@@ -4,7 +4,22 @@ import json
 import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from flask import Flask
+from threading import Thread
 
+# ─── Flask — keep-alive для Render + UptimeRobot ─────────────────────────────
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот работает!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+Thread(target=run_flask, daemon=True).start()
+
+# ─── Бот ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATA_FILE = "save_data.json"
 
