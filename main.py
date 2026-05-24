@@ -150,6 +150,7 @@ def load_data():
                 p.setdefault("wins", 0)
                 p.setdefault("losses", 0)
                 p.setdefault("pvp_wins", 0)
+                p.setdefault("pvp_win_dates", [])
             print("Данные загружены: " + str(len(user_data)) + " игроков")
         except Exception as e:
             print("Ошибка загрузки данных: " + str(e))
@@ -180,7 +181,7 @@ def init_user(uid, name=None, chat_id=None):
             "last_loot_time": 0, "last_action_time": 0,
             "roll_buff": 0, "roll_buff_time": 0,
             "lucky_amulet": False,
-            "wins": 0, "losses": 0, "pvp_wins": 0,
+            "wins": 0, "losses": 0, "pvp_wins": 0, "pvp_win_dates": [],
             "name": name or "Герой",
         }
         save_data()
@@ -510,6 +511,17 @@ def _do_action_inline(call):
 
 
 def _send_stats(chat_id, uid, edit_msg=None):
+    import io
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from datetime import datetime, timedelta
+        HAS_MPL = True
+    except ImportError:
+        HAS_MPL = False
+
     p = user_data[uid]
     wins = p.get("wins", 0)
     losses = p.get("losses", 0)
@@ -524,6 +536,8 @@ def _send_stats(chat_id, uid, edit_msg=None):
         "Всего боёв: " + str(wins + losses) + "\n"
         "Винрейт (над игроками): " + ratio
     )
+
+    # ── Отправляем текст ──────────────────────────────────────────────────────
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id, message_id=edit_msg.message_id, text=text,
@@ -531,6 +545,53 @@ def _send_stats(chat_id, uid, edit_msg=None):
         )
     else:
         bot.send_message(chat_id, text)
+
+    # ── График побед над игроками ─────────────────────────────────────────────
+    if not HAS_MPL:
+        return
+    dates_raw = p.get("pvp_win_dates", [])
+    if not dates_raw:
+        return
+
+    # Считаем победы по дням
+    from collections import Counter
+    counts = Counter(dates_raw)
+
+    # Диапазон: от первой победы до сегодня
+    today = datetime.today().date()
+    first = datetime.strptime(min(counts.keys()), "%Y-%m-%d").date()
+    all_days = []
+    d = first
+    while d <= today:
+        all_days.append(d)
+        d += timedelta(days=1)
+
+    y_vals = [counts.get(str(day), 0) for day in all_days]
+    x_vals = [datetime.combine(day, datetime.min.time()) for day in all_days]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    fig.patch.set_facecolor("#f5f5f5")
+    ax.set_facecolor("#f5f5f5")
+
+    ax.bar(x_vals, y_vals, color="#b5cc18", width=0.8, zorder=3)
+    ax.set_title("Победы над игроками — " + get_name(uid), fontsize=13, color="#333333")
+    ax.set_ylabel("Побед", fontsize=10, color="#555555")
+    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.xticks(rotation=45, ha="right", fontsize=8, color="#555555")
+    plt.yticks(fontsize=8, color="#555555")
+    ax.grid(axis="y", color="#cccccc", linewidth=0.7, zorder=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=120)
+    buf.seek(0)
+    plt.close(fig)
+
+    bot.send_photo(chat_id, buf, caption="📊 График побед над игроками")
 
 def _show_race_selection(chat_id, uid, edit_msg=None):
     p = user_data[uid]
@@ -894,7 +955,7 @@ def handle_pve(call):
         log += "🎲 " + event + "\n"
     log += "\n"
 
-    MAX_ROUNDS = 6
+    MAX_ROUNDS = random.randint(1, 3)
     winner = None
 
     for rnd in range(1, MAX_ROUNDS + 1):
@@ -945,7 +1006,7 @@ def handle_pve(call):
     if winner == "player" or (winner is None and monster_hp < monster_max_hp // 2):
         # Победил игрок (или нанёс больше урона за 6 раундов)
         if winner is None:
-            log += "🏆 " + pname + " продержался все 6 раундов и победил по очкам!\n"
+            log += "🏆 " + pname + " продержался все " + str(MAX_ROUNDS) + " раундов и победил по очкам!\n"
         else:
             log += "🏆 " + pname + " победил! Монстр повержен!\n"
         p["wins"] = p.get("wins", 0) + 1
@@ -1072,6 +1133,7 @@ def handle_pvp_battle(call):
             p_loser["losses"]   = p_loser.get("losses", 0) + 1
             p_winner["wins"]    = p_winner.get("wins", 0) + 1
             p_winner["pvp_wins"]= p_winner.get("pvp_wins", 0) + 1
+            p_winner.setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
             del active_pvp[b_id]
             save_data()
             bot.edit_message_text(
@@ -1153,6 +1215,7 @@ def handle_pvp_battle(call):
         p2["hp"] = max(10, p2["hp"] - dmg)
         p1["wins"] = p1.get("wins", 0) + 1
         p1["pvp_wins"] = p1.get("pvp_wins", 0) + 1
+        p1.setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
         p2["losses"] = p2.get("losses", 0) + 1
         log += "🏆 " + n1 + " побеждает в дуэли!\n" + n2 + " получает -" + str(dmg) + " HP (осталось " + str(p2["hp"]) + "/" + str(p2["max_hp"]) + ")"
     elif wins2 > wins1:
@@ -1160,6 +1223,7 @@ def handle_pvp_battle(call):
         p1["hp"] = max(10, p1["hp"] - dmg)
         p2["wins"] = p2.get("wins", 0) + 1
         p2["pvp_wins"] = p2.get("pvp_wins", 0) + 1
+        p2.setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
         p1["losses"] = p1.get("losses", 0) + 1
         log += "🏆 " + n2 + " побеждает в дуэли!\n" + n1 + " получает -" + str(dmg) + " HP (осталось " + str(p1["hp"]) + "/" + str(p1["max_hp"]) + ")"
     else:
@@ -1389,6 +1453,7 @@ def _resolve_brawl(brawl_id):
     # Победитель получает победу + шанс дропа
     user_data[winner_id]["wins"] = user_data[winner_id].get("wins", 0) + 1
     user_data[winner_id]["pvp_wins"] = user_data[winner_id].get("pvp_wins", 0) + 1
+    user_data[winner_id].setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
     drop_log = ""
     if random.random() < DROP_CHANCE:
         drop_id = random.choice(ITEM_KEYS)
