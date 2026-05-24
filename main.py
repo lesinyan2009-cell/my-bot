@@ -26,6 +26,7 @@ DATA_FILE = "save_data.json"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 user_data = {}
+chat_members = {}  # chat_id -> set of uid — кто играл в этом чате
 active_pvp = {}   # одиночные дуэли
 active_brawl = {} # многопользовательские битвы
 callback_spam = {}  # антиспам: uid -> {cb_data: timestamp}
@@ -105,12 +106,15 @@ DROP_CHANCE = 0.10  # 10% шанс дропа
 # ─── сохранение / загрузка ────────────────────────────────────────────────────
 
 def load_data():
-    global user_data
+    global user_data, chat_members
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            user_data = {int(k): v for k, v in raw.items()}
+            user_data = {int(k): v for k, v in raw.get("users", raw).items()} if "users" in raw else {int(k): v for k, v in raw.items()}
+            # Загружаем chat_members если есть
+            if "chat_members" in raw:
+                chat_members = {int(cid): set(uids) for cid, uids in raw["chat_members"].items()}
             for uid, p in user_data.items():
                 p.setdefault("lucky_amulet", False)
                 p.setdefault("wins", 0)
@@ -120,21 +124,24 @@ def load_data():
         except Exception as e:
             print("Ошибка загрузки данных: " + str(e))
             user_data = {}
+            chat_members = {}
     else:
         user_data = {}
+        chat_members = {}
 
 
 def save_data():
     try:
+        serializable_chat_members = {str(cid): list(uids) for cid, uids in chat_members.items()}
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_data, f, ensure_ascii=False, indent=2)
+            json.dump({"users": user_data, "chat_members": serializable_chat_members}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("Ошибка сохранения: " + str(e))
 
 
 # ─── вспомогательные функции ──────────────────────────────────────────────────
 
-def init_user(uid, name=None):
+def init_user(uid, name=None, chat_id=None):
     if uid not in user_data:
         user_data[uid] = {
             "race": None, "max_hp": 100, "hp": 100,
@@ -149,6 +156,11 @@ def init_user(uid, name=None):
         save_data()
     elif name:
         user_data[uid]["name"] = name
+    # Регистрируем игрока в чате
+    if chat_id and chat_id < 0:  # только группы (chat_id < 0)
+        if chat_id not in chat_members:
+            chat_members[chat_id] = set()
+        chat_members[chat_id].add(uid)
 
 
 def get_name(uid):
@@ -205,12 +217,19 @@ def check_spam(uid, cb_data):
 
 
 def _send_top10(chat_id, edit_msg=None):
-    """Топ-10 игроков по pvp_wins."""
-    players = [(uid, p) for uid, p in user_data.items() if p.get("race")]
+    """Топ-10 игроков по pvp_wins — только для этой группы."""
+    group_uids = chat_members.get(chat_id, set())
+    if group_uids:
+        players = [(uid, p) for uid, p in user_data.items() if uid in group_uids and p.get("race")]
+        scope_label = "ЭТОЙ ГРУППЫ"
+    else:
+        # Личный чат — показываем всех (или только самого пользователя)
+        players = [(uid, p) for uid, p in user_data.items() if p.get("race")]
+        scope_label = "СЕРВЕРА"
     players.sort(key=lambda x: x[1].get("pvp_wins", 0), reverse=True)
     top = players[:10]
     if not top:
-        text = "🥇 Топ пуст — никто ещё не победил в PvP!"
+        text = "🥇 Топ пуст — никто ещё не победил в PvP в этой группе!"
     else:
         medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
         lines = []
@@ -225,7 +244,7 @@ def _send_top10(chat_id, edit_msg=None):
                 "   Побед: " + str(pvp_w) + "  Поражений: " + str(losses) +
                 "  Винрейт: " + wr
             )
-        text = "🥇 ТОП-10 ИГРОКОВ СЕРВЕРА\n\n" + "\n\n".join(lines)
+        text = "🥇 ТОП-10 " + scope_label + "\n\n" + "\n\n".join(lines)
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id, message_id=edit_msg.message_id, text=text,
@@ -249,7 +268,7 @@ MENU_PAGES = [
         ("📦 Открыть сундук",      "menu_loot"),
         ("🎪 Случайное действие",  "menu_action"),
         ("🏆 Статистика",          "menu_stats"),
-        ("🥇 Топ-10 сервера",      "menu_top"),
+        ("🥇 Топ-10 группы",       "menu_top"),
         ("🎭 Сменить класс",       "menu_race"),
         ("📋 Все предметы",        "menu_items"),
     ],
@@ -296,7 +315,7 @@ def menu_header(uid):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("mpage_"))
 def handle_menu_page(call):
     uid = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
     arg = call.data[6:]
     if arg == "noop":
         bot.answer_callback_query(call.id)
@@ -319,21 +338,23 @@ def handle_menu_page(call):
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     txt = (
         "🎮 Добро пожаловать в игру!\n\n"
-        "Нажми 📋 Меню внизу — там всё нужное.\n\n"
-        "Команды:\n"
-        "/race — выбрать / сменить класс\n"
-        "/fight — битва с монстром\n"
-        "/pvp — дуэль (ответом на сообщение игрока)\n"
-        "/brawl — создать групповую битву (до 4 игроков)\n"
-        "/loot — сундук (кд 2 часа)\n"
-        "/action — случайное действие (кд 3 мин)\n"
-        "/roll — бросить d20\n"
-        "/items — список всех предметов\n"
-        "/stats — твоя статистика побед\n"
-        "/top — топ-10 игроков сервера"
+        "📋 Список команд:\n"
+        "┌ /race — выбрать / сменить класс\n"
+        "├ /fight — битва с монстром\n"
+        "├ /pvp — дуэль (ответом на сообщение игрока)\n"
+        "├ /brawl — групповая битва (до 4 игроков)\n"
+        "├ /loot — сундук с добычей (кд 2 часа)\n"
+        "├ /action — случайное действие (кд 3 мин)\n"
+        "├ /roll — бросить кубик d20\n"
+        "├ /my_hero — карточка героя\n"
+        "├ /bag — инвентарь\n"
+        "├ /stats — твоя статистика\n"
+        "├ /items — все предметы в игре\n"
+        "└ /top — топ-10 игроков этой группы\n\n"
+        "Нажми 📋 Меню внизу — там всё то же самое в удобном виде!"
     )
     bot.send_message(message.chat.id, txt, reply_markup=main_keyboard())
 
@@ -353,7 +374,7 @@ def show_items_list(message):
 @bot.message_handler(func=lambda m: m.text == "📋 Меню")
 def show_menu(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     bot.send_message(message.chat.id, menu_header(uid), reply_markup=menu_inline_page(0))
 
 
@@ -363,7 +384,7 @@ def show_menu(message):
 def handle_menu_action(call):
     action = call.data[5:]
     uid = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
     # Антиспам для кнопок меню
     if check_spam(uid, call.data):
@@ -508,7 +529,7 @@ def choose_race_menu(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("r") and call.data[1:].isdigit())
 def handle_race_selection(call):
     uid = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
     idx = int(call.data[1:])
     if idx >= len(RACE_KEYS):
         return
@@ -683,19 +704,19 @@ def _do_loot(chat_id, uid, edit_msg=None, call=None):
 @bot.message_handler(commands=["my_hero"])
 def check_hero(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     _send_hero_info(message.chat.id, uid)
 
 @bot.message_handler(commands=["bag"])
 def check_bag(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     _send_bag(message.chat.id, uid)
 
 @bot.message_handler(commands=["stats"])
 def check_stats(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     _send_stats(message.chat.id, uid)
 
 
@@ -709,7 +730,7 @@ def show_top(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("use"))
 def handle_item_use(call):
     uid = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
     p = user_data[uid]
     it_id = call.data[3:]
     if it_id not in p["inventory"]:
@@ -792,7 +813,7 @@ def handle_item_use(call):
 @bot.message_handler(commands=["fight"])
 def start_fight(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     if user_data[uid]["race"] is None:
         bot.send_message(message.chat.id, "Сначала создай персонажа через /race")
         return
@@ -807,7 +828,7 @@ def start_fight(message):
 @bot.callback_query_handler(func=lambda call: call.data in ["pvep", "pvem"])
 def handle_pve(call):
     uid = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
     if check_spam(uid, call.data):
         bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
@@ -876,12 +897,12 @@ def handle_pve(call):
 @bot.message_handler(commands=["pvp"])
 def start_pvp(message):
     atk_id = message.from_user.id
-    init_user(atk_id, message.from_user.first_name)
+    init_user(atk_id, message.from_user.first_name, chat_id=message.chat.id)
     if not message.reply_to_message:
         bot.reply_to(message, "Пиши /pvp в ответ на сообщение игрока!")
         return
     def_id = message.reply_to_message.from_user.id
-    init_user(def_id, message.reply_to_message.from_user.first_name)
+    init_user(def_id, message.reply_to_message.from_user.first_name, chat_id=message.chat.id)
     if atk_id == def_id:
         bot.reply_to(message, "Нельзя драться с собой!")
         return
@@ -1125,7 +1146,7 @@ def _brawl_lobby_markup(brawl_id):
 @bot.message_handler(commands=["brawl"])
 def start_brawl_cmd(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     p = user_data[uid]
     if p["race"] is None:
         bot.send_message(message.chat.id, "Сначала выбери расу через /race")
@@ -1158,7 +1179,7 @@ def handle_brawl(call):
     action   = parts[1]
     brawl_id = parts[2]
     uid      = call.from_user.id
-    init_user(uid, call.from_user.first_name)
+    init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
     if brawl_id not in active_brawl:
         bot.answer_callback_query(call.id, "Битва не найдена или уже завершена.")
@@ -1324,14 +1345,14 @@ def _resolve_brawl(brawl_id):
 @bot.message_handler(commands=["loot"])
 def get_loot(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     _do_loot(message.chat.id, uid)
 
 
 @bot.message_handler(commands=["action"])
 def do_action(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     cur = time.time()
     last = user_data[uid]["last_action_time"]
     if cur - last < 180:
@@ -1347,7 +1368,7 @@ def do_action(message):
 @bot.message_handler(commands=["roll"])
 def roll_cube(message):
     uid = message.from_user.id
-    init_user(uid, message.from_user.first_name)
+    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     _do_roll(message.chat.id, uid)
 
 
