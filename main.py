@@ -5,7 +5,7 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-BOT_TOKEN = ""
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATA_FILE = "save_data.json"
 
 bot = telebot.TeleBot(BOT_TOKEN)
