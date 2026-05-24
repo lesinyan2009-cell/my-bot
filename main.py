@@ -28,6 +28,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 user_data = {}
 active_pvp = {}   # одиночные дуэли
 active_brawl = {} # многопользовательские битвы
+callback_spam = {}  # антиспам: uid -> {cb_data: timestamp}
 
 RACE_STATS = {
     "Томатная эльфийка": {"hp": 90,  "mp": 70,  "dex": 14, "emoji": "🍅"},
@@ -189,9 +190,49 @@ def back_to_menu_markup(page=0):
     return markup
 
 
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("📋 Меню"))
-    return kb
+ANTISPAM_DELAY = 2.5  # секунды между одинаковыми нажатиями
+
+def check_spam(uid, cb_data):
+    """Возвращает True если это спам (слишком быстрое повторное нажатие)."""
+    now = time.time()
+    if uid not in callback_spam:
+        callback_spam[uid] = {}
+    last = callback_spam[uid].get(cb_data, 0)
+    if now - last < ANTISPAM_DELAY:
+        return True
+    callback_spam[uid][cb_data] = now
+    return False
+
+
+def _send_top10(chat_id, edit_msg=None):
+    """Топ-10 игроков по pvp_wins."""
+    players = [(uid, p) for uid, p in user_data.items() if p.get("race")]
+    players.sort(key=lambda x: x[1].get("pvp_wins", 0), reverse=True)
+    top = players[:10]
+    if not top:
+        text = "🥇 Топ пуст — никто ещё не победил в PvP!"
+    else:
+        medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+        lines = []
+        for i, (uid, p) in enumerate(top):
+            pvp_w = p.get("pvp_wins", 0)
+            losses = p.get("losses", 0)
+            total = pvp_w + losses
+            wr = str(round(pvp_w / total * 100)) + "%" if total > 0 else "—"
+            lines.append(
+                medals[i] + " " + get_name(uid) +
+                " [" + get_race_display(p["race"]) + "]\n"
+                "   Побед: " + str(pvp_w) + "  Поражений: " + str(losses) +
+                "  Винрейт: " + wr
+            )
+        text = "🥇 ТОП-10 ИГРОКОВ СЕРВЕРА\n\n" + "\n\n".join(lines)
+    if edit_msg:
+        bot.edit_message_text(
+            chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+            reply_markup=back_to_menu_markup(0)
+        )
+    else:
+        bot.send_message(chat_id, text)
 
 
 # ─── Страничное меню ──────────────────────────────────────────────────────────
@@ -199,25 +240,23 @@ def back_to_menu_markup(page=0):
 # Кнопки идут попарно, внизу стрелки навигации.
 
 MENU_PAGES = [
-    [   # Страница 1 — бой и герой
+    [   # Единственная страница — всё меню
         ("👤 Герой",              "menu_hero"),
         ("🎒 Инвентарь",          "menu_bag"),
         ("⚔️ Битва с монстром",   "menu_fight"),
         ("⚔️⚔️ Групповая битва",  "menu_brawl"),
-    ],
-    [   # Страница 2 — удача, лут, прочее
         ("🎲 Кубик d20",           "menu_roll"),
         ("📦 Открыть сундук",      "menu_loot"),
         ("🎪 Случайное действие",  "menu_action"),
         ("🏆 Статистика",          "menu_stats"),
+        ("🥇 Топ-10 сервера",      "menu_top"),
         ("🎭 Сменить класс",       "menu_race"),
         ("📋 Все предметы",        "menu_items"),
     ],
 ]
 
 PAGE_TITLES = [
-    "⚔️ Бой и герой",
-    "🎲 Удача и прочее",
+    "🎮 Главное меню",
 ]
 
 
@@ -262,6 +301,9 @@ def handle_menu_page(call):
     if arg == "noop":
         bot.answer_callback_query(call.id)
         return
+    if check_spam(uid, call.data):
+        bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
+        return
     page = int(arg)
     bot.edit_message_text(
         chat_id=call.message.chat.id,
@@ -290,7 +332,8 @@ def send_welcome(message):
         "/action — случайное действие (кд 3 мин)\n"
         "/roll — бросить d20\n"
         "/items — список всех предметов\n"
-        "/stats — твоя статистика побед"
+        "/stats — твоя статистика побед\n"
+        "/top — топ-10 игроков сервера"
     )
     bot.send_message(message.chat.id, txt, reply_markup=main_keyboard())
 
@@ -321,6 +364,11 @@ def handle_menu_action(call):
     action = call.data[5:]
     uid = call.from_user.id
     init_user(uid, call.from_user.first_name)
+
+    # Антиспам для кнопок меню
+    if check_spam(uid, call.data):
+        bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!", show_alert=False)
+        return
 
     if action == "hero":
         _send_hero_info(call.message.chat.id, uid, edit_msg=call.message)
@@ -373,8 +421,13 @@ def handle_menu_action(call):
             )
         )
 
+    elif action == "top":
+        _send_top10(call.message.chat.id, edit_msg=call.message)
+
     elif action == "brawl":
         _start_brawl_menu(call)
+
+    bot.answer_callback_query(call.id)
 
 
 def _do_action_inline(call):
@@ -646,6 +699,11 @@ def check_stats(message):
     _send_stats(message.chat.id, uid)
 
 
+@bot.message_handler(commands=["top"])
+def show_top(message):
+    _send_top10(message.chat.id)
+
+
 # ─── Использование предметов ──────────────────────────────────────────────────
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("use"))
@@ -750,17 +808,23 @@ def start_fight(message):
 def handle_pve(call):
     uid = call.from_user.id
     init_user(uid, call.from_user.first_name)
+
+    if check_spam(uid, call.data):
+        bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
+        return
+
     p = user_data[uid]
     if p["race"] is None:
         bot.answer_callback_query(call.id, "Сначала выбери расу!")
         return
+
     m_name = random.choice(list(MONSTERS_DB.keys()))
     m_info = MONSTERS_DB[m_name]
+    total_bonus = p["combat_bonus"] + get_active_roll_buff(uid)
+    pname = get_name(uid)
     p_dice = random.randint(1, 20)
     e_dice = random.randint(1, 20)
-    total_bonus = p["combat_bonus"] + get_active_roll_buff(uid)
     event = random.choice(BATTLE_EVENTS)
-    pname = get_name(uid)
 
     log = "⚔️ " + pname + " [" + get_race_display(p["race"]) + "] vs " + m_name + "\n"
     log += "└ Монстр " + m_info["desc"] + "\n"
@@ -804,6 +868,7 @@ def handle_pve(call):
         text=log,
         reply_markup=back_to_menu_markup(0)
     )
+    bot.answer_callback_query(call.id)
 
 
 # ─── /pvp — дуэль 1 на 1 ─────────────────────────────────────────────────────
@@ -824,77 +889,181 @@ def start_pvp(message):
         bot.reply_to(message, "У обоих игроков должны быть расы!")
         return
     b_id = str(atk_id) + "X" + str(def_id)
-    active_pvp[b_id] = {"attacker": atk_id, "defender": def_id}
+    active_pvp[b_id] = {"attacker": atk_id, "defender": def_id, "phase": "challenge"}
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("Физ. защита ⚔️", callback_data="duelp" + b_id),
         InlineKeyboardButton("Маг. защита 🔮",  callback_data="duelm" + b_id)
     )
+    markup.add(
+        InlineKeyboardButton("❌ Отклонить вызов", callback_data="dueld" + b_id),
+        InlineKeyboardButton("🏳️ Отозвать вызов",  callback_data="duels" + b_id),
+    )
     def_name = message.reply_to_message.from_user.first_name
-    bot.send_message(message.chat.id, "⚔️ Вызов для " + def_name + "! Выбери тип защиты:", reply_markup=markup)
+    atk_name = message.from_user.first_name
+    bot.send_message(
+        message.chat.id,
+        "⚔️ " + atk_name + " вызывает " + def_name + " на дуэль!\n\n"
+        + def_name + ": выбери тип защиты или отклони вызов.\n"
+        + atk_name + ": можешь отозвать вызов.",
+        reply_markup=markup
+    )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("duelp") or call.data.startswith("duelm"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("duelp") or call.data.startswith("duelm") or call.data.startswith("dueld") or call.data.startswith("duels"))
 def handle_pvp_battle(call):
-    mode = call.data[4]
+    prefix = call.data[:5]
     b_id = call.data[5:]
+    uid = call.from_user.id
+
+    if check_spam(uid, call.data):
+        bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
+        return
     if b_id not in active_pvp:
         bot.answer_callback_query(call.id, "Дуэль уже завершена или не найдена.")
         return
+
     duel = active_pvp[b_id]
-    if call.from_user.id != duel["defender"]:
+    atk_id = duel["attacker"]
+    def_id = duel["defender"]
+
+    # ── Отклонить вызов (защищающийся) ───────────────────────────────────────
+    if prefix == "dueld":
+        if uid != def_id:
+            bot.answer_callback_query(call.id, "Только вызванный игрок может отклонить!", show_alert=True)
+            return
+        del active_pvp[b_id]
+        n_atk = get_name(atk_id)
+        n_def = get_name(def_id)
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="❌ " + n_def + " отклонил вызов " + n_atk + ". Дуэли не будет.",
+            reply_markup=back_to_menu_markup(0)
+        )
+        bot.answer_callback_query(call.id, "Вызов отклонён.")
+        return
+
+    # ── Отозвать / Сдаться (duels) ────────────────────────────────────────────
+    if prefix == "duels":
+        phase = duel.get("phase", "challenge")
+        if phase == "challenge":
+            # Отозвать вызов — только атакующий
+            if uid != atk_id:
+                bot.answer_callback_query(call.id, "Только атакующий может отозвать вызов!", show_alert=True)
+                return
+            del active_pvp[b_id]
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="🏳️ " + get_name(atk_id) + " отозвал вызов. Дуэли не будет.",
+                reply_markup=back_to_menu_markup(0)
+            )
+            bot.answer_callback_query(call.id, "Вызов отозван.")
+        else:
+            # Сдаться во время боя — любой участник
+            if uid not in (atk_id, def_id):
+                bot.answer_callback_query(call.id, "Ты не участник этой дуэли!", show_alert=True)
+                return
+            loser_id  = uid
+            winner_id = def_id if uid == atk_id else atk_id
+            p_loser   = user_data[loser_id]
+            p_winner  = user_data[winner_id]
+            dmg = random.randint(20, 40)
+            p_loser["hp"]       = max(10, p_loser["hp"] - dmg)
+            p_loser["losses"]   = p_loser.get("losses", 0) + 1
+            p_winner["wins"]    = p_winner.get("wins", 0) + 1
+            p_winner["pvp_wins"]= p_winner.get("pvp_wins", 0) + 1
+            del active_pvp[b_id]
+            save_data()
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    "🏳️ " + get_name(loser_id) + " сдался!\n\n"
+                    "🏆 " + get_name(winner_id) + " побеждает!\n"
+                    + get_name(loser_id) + " получает -" + str(dmg) + " HP за трусость"
+                    + " (осталось " + str(p_loser["hp"]) + "/" + str(p_loser["max_hp"]) + ")"
+                ),
+                reply_markup=back_to_menu_markup(0)
+            )
+            bot.answer_callback_query(call.id, "Ты сдался.")
+        return
+
+    # ── Принять вызов (физ / маг) и сыграть 3 раунда ─────────────────────────
+    mode = call.data[4]   # 'p' или 'm'
+    if uid != def_id:
         bot.answer_callback_query(call.id, "Это не твоя дуэль!")
         return
-    p1 = user_data[duel["attacker"]]
-    p2 = user_data[duel["defender"]]
-    n1 = get_name(duel["attacker"])
-    n2 = get_name(duel["defender"])
-    d1, d2 = random.randint(1, 20), random.randint(1, 20)
-    b1 = p1["combat_bonus"] + get_active_roll_buff(duel["attacker"])
-    b2 = p2["combat_bonus"] + get_active_roll_buff(duel["defender"])
 
-    if random.choice([True, False]) and p1["mp"] >= 15:
-        p1["mp"] -= 15
-        s1 = d1 + 15 + b1
-        txt1 = "магией"
-    else:
-        s1 = d1 + p1["dexterity"] + b1
-        txt1 = "физой"
+    # Переводим дуэль в фазу боя
+    duel["phase"] = "fighting"
 
-    if mode == "m" and p2["mp"] >= 15:
-        p2["mp"] -= 15
-        s2 = d2 + 15 + b2
-        txt2 = "магией"
-    else:
-        s2 = d2 + p2["dexterity"] + b2
-        txt2 = "физой"
+    p1 = user_data[atk_id]
+    p2 = user_data[def_id]
 
-    log = "⚔️ ДУЭЛЬ: " + n1 + " vs " + n2 + "\n\n"
-    log += "🗡️ " + n1 + " [" + get_race_display(p1["race"]) + "] атакует " + txt1 + " → " + str(s1) + "\n"
-    log += "🛡️ " + n2 + " [" + get_race_display(p2["race"]) + "] защищается " + txt2 + " → " + str(s2) + "\n\n"
+    # ── 3 раунда (лучший из 3) ────────────────────────────────────────────────
+    wins1 = 0
+    wins2 = 0
+    rounds_log = []
 
-    if s1 > s2:
+    for rnd in range(1, 4):
+        d1 = random.randint(1, 20)
+        d2 = random.randint(1, 20)
+
+        if random.choice([True, False]) and p1["mp"] >= 15:
+            p1["mp"] -= 15
+            s1 = d1 + 15 + b1
+            txt1 = "магией 🔮"
+        else:
+            s1 = d1 + p1["dexterity"] + b1
+            txt1 = "физой ⚔️"
+
+        if mode == "m" and p2["mp"] >= 15:
+            p2["mp"] -= 15
+            s2 = d2 + 15 + b2
+            txt2 = "магией 🔮"
+        else:
+            s2 = d2 + p2["dexterity"] + b2
+            txt2 = "физой ⚔️"
+
+        rline = "【Раунд " + str(rnd) + "】\n"
+        rline += "  🗡️ " + n1 + " " + txt1 + " → " + str(s1) + "\n"
+        rline += "  🛡️ " + n2 + " " + txt2 + " → " + str(s2) + "\n"
+
+        if s1 > s2:
+            wins1 += 1
+            rline += "  ✅ " + n1 + " берёт раунд!"
+        elif s2 > s1:
+            wins2 += 1
+            rline += "  ✅ " + n2 + " берёт раунд!"
+        else:
+            rline += "  🤝 Раунд — ничья"
+
+        rounds_log.append(rline)
+
+    # ── Итог дуэли ────────────────────────────────────────────────────────────
+    log = (
+        "⚔️ ДУЭЛЬ 3 РАУНДА: " + n1 + " vs " + n2 + "\n"
+        + get_race_display(p1["race"]) + " vs " + get_race_display(p2["race"]) + "\n\n"
+        + "\n".join(rounds_log) + "\n\n"
+        + "── СЧЁТ: " + n1 + " " + str(wins1) + " : " + str(wins2) + " " + n2 + " ──\n\n"
+    )
+
+    if wins1 > wins2:
         dmg = random.randint(20, 40)
         p2["hp"] = max(10, p2["hp"] - dmg)
         p1["wins"] = p1.get("wins", 0) + 1
         p1["pvp_wins"] = p1.get("pvp_wins", 0) + 1
         p2["losses"] = p2.get("losses", 0) + 1
-        log += (
-            "🏆 " + n1 + " побеждает!\n"
-            + n2 + " получает -" + str(dmg) + " HP "
-            + "(осталось " + str(p2["hp"]) + "/" + str(p2["max_hp"]) + ")"
-        )
-    elif s2 > s1:
+        log += "🏆 " + n1 + " побеждает в дуэли!\n" + n2 + " получает -" + str(dmg) + " HP (осталось " + str(p2["hp"]) + "/" + str(p2["max_hp"]) + ")"
+    elif wins2 > wins1:
         dmg = random.randint(20, 40)
         p1["hp"] = max(10, p1["hp"] - dmg)
         p2["wins"] = p2.get("wins", 0) + 1
         p2["pvp_wins"] = p2.get("pvp_wins", 0) + 1
         p1["losses"] = p1.get("losses", 0) + 1
-        log += (
-            "🏆 " + n2 + " побеждает!\n"
-            + n1 + " получает -" + str(dmg) + " HP "
-            + "(осталось " + str(p1["hp"]) + "/" + str(p1["max_hp"]) + ")"
-        )
+        log += "🏆 " + n2 + " побеждает в дуэли!\n" + n1 + " получает -" + str(dmg) + " HP (осталось " + str(p1["hp"]) + "/" + str(p1["max_hp"]) + ")"
     else:
         log += "🤝 Ничья! " + n1 + " и " + n2 + " разошлись по домам."
 
@@ -906,6 +1075,7 @@ def handle_pvp_battle(call):
         text=log,
         reply_markup=back_to_menu_markup(0)
     )
+    bot.answer_callback_query(call.id)
 
 
 # ─── /brawl — групповая битва (до 4 игроков) ─────────────────────────────────
