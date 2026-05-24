@@ -333,6 +333,14 @@ def handle_menu_page(call):
     bot.answer_callback_query(call.id)
 
 
+# ─── Нижняя клавиатура ────────────────────────────────────────────────────────
+
+def main_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(KeyboardButton("📋 Меню"))
+    return markup
+
+
 # ─── /start и /help ───────────────────────────────────────────────────────────
 
 @bot.message_handler(commands=["start", "help"])
