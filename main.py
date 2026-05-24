@@ -19,11 +19,41 @@ def run_flask():
 
 Thread(target=run_flask, daemon=True).start()
 
+# ─── Пассивная регенерация HP и MP (каждые 5 минут +10) ──────────────────────
+
+def regen_loop():
+    while True:
+        time.sleep(300)  # 5 минут
+        for uid, p in user_data.items():
+            if p.get("race"):
+                p["hp"] = min(p["max_hp"], p["hp"] + 10)
+                p["mp"] = min(p["max_mp"], p["mp"] + 10)
+        save_data()
+
+Thread(target=regen_loop, daemon=True).start()
+
 # ─── Бот ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATA_FILE = "save_data.json"
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ─── Список команд (подсказка при вводе /) ────────────────────────────────────
+bot.set_my_commands([
+    telebot.types.BotCommand("/race",    "выбрать / сменить класс"),
+    telebot.types.BotCommand("/fight",   "битва с монстром (PvE до 6 раундов)"),
+    telebot.types.BotCommand("/pvp",     "дуэль 1 на 1 (ответом на сообщение)"),
+    telebot.types.BotCommand("/brawl",   "групповая битва (до 10 игроков)"),
+    telebot.types.BotCommand("/loot",    "открыть сундук (кд 2 часа)"),
+    telebot.types.BotCommand("/action",  "случайное действие (кд 3 мин)"),
+    telebot.types.BotCommand("/roll",    "бросить кубик d20"),
+    telebot.types.BotCommand("/my_hero", "карточка героя"),
+    telebot.types.BotCommand("/bag",     "инвентарь"),
+    telebot.types.BotCommand("/stats",   "твоя статистика"),
+    telebot.types.BotCommand("/items",   "все предметы в игре"),
+    telebot.types.BotCommand("/top",     "топ-10 игроков группы"),
+    telebot.types.BotCommand("/help",    "помощь"),
+])
 
 user_data = {}
 chat_members = {}  # chat_id -> set of uid — кто играл в этом чате
@@ -351,9 +381,9 @@ def send_welcome(message):
         "🎮 Добро пожаловать в игру!\n\n"
         "📋 Список команд:\n"
         "┌ /race — выбрать / сменить класс\n"
-        "├ /fight — битва с монстром\n"
+        "├ /fight — битва с монстром (PvE до 6 раундов)\n"
         "├ /pvp — дуэль (ответом на сообщение игрока)\n"
-        "├ /brawl — групповая битва (до 4 игроков)\n"
+        "├ /brawl — групповая битва (до 10 игроков)\n"
         "├ /loot — сундук с добычей (кд 2 часа)\n"
         "├ /action — случайное действие (кд 3 мин)\n"
         "├ /roll — бросить кубик d20\n"
@@ -849,11 +879,14 @@ def handle_pve(call):
 
     m_name = random.choice(list(MONSTERS_DB.keys()))
     m_info = MONSTERS_DB[m_name]
-    total_bonus = p["combat_bonus"] + get_active_roll_buff(uid)
     pname = get_name(uid)
-    p_dice = random.randint(1, 20)
-    e_dice = random.randint(1, 20)
     event = random.choice(BATTLE_EVENTS)
+
+    # Инициализируем HP монстра (примерно как у игрока)
+    monster_hp = random.randint(60, 120)
+    monster_max_hp = monster_hp
+    player_hp = p["hp"]
+    total_bonus = p["combat_bonus"] + get_active_roll_buff(uid)
 
     log = "⚔️ " + pname + " [" + get_race_display(p["race"]) + "] vs " + m_name + "\n"
     log += "└ Монстр " + m_info["desc"] + "\n"
@@ -861,34 +894,70 @@ def handle_pve(call):
         log += "🎲 " + event + "\n"
     log += "\n"
 
-    if call.data == "pvep" or p["mp"] < 15:
-        p_score = p_dice + p["dexterity"] + total_bonus
-        e_score = e_dice + m_info["bonus"]
-        log += pname + " " + RACE_COMBAT[p["race"]]["phys"] + "\n"
-        log += "Бросок: " + str(p_dice) + "+" + str(p["dexterity"]) + "+" + str(total_bonus) + " = " + str(p_score) + "\n"
-    else:
-        p["mp"] -= 15
-        p_score = p_dice + 15 + total_bonus
-        e_score = e_dice + m_info["bonus"]
-        log += pname + " " + RACE_COMBAT[p["race"]]["magic"] + "\n"
-        log += "Магия: " + str(p_dice) + "+15+" + str(total_bonus) + " = " + str(p_score) + "\n"
+    MAX_ROUNDS = 6
+    winner = None
 
-    log += m_name + ": " + str(e_dice) + "+" + str(m_info["bonus"]) + " = " + str(e_score) + "\n\n"
+    for rnd in range(1, MAX_ROUNDS + 1):
+        p_dice = random.randint(1, 20)
+        e_dice = random.randint(1, 20)
 
-    if p_score > e_score:
+        if call.data == "pvep" or p["mp"] < 15:
+            p_score = p_dice + p["dexterity"] + total_bonus
+            atk_desc = RACE_COMBAT[p["race"]]["phys"]
+            score_str = str(p_dice) + "+" + str(p["dexterity"]) + "+" + str(total_bonus)
+        else:
+            if p["mp"] >= 15:
+                p["mp"] -= 15
+            p_score = p_dice + 15 + total_bonus
+            atk_desc = RACE_COMBAT[p["race"]]["magic"]
+            score_str = str(p_dice) + "+15+" + str(total_bonus)
+
+        e_score = e_dice + m_info["bonus"]
+
+        log += "── Раунд " + str(rnd) + " ──\n"
+        log += pname + " " + atk_desc + " [" + score_str + " = " + str(p_score) + "]\n"
+        log += m_name + " атакует [" + str(e_dice) + "+" + str(m_info["bonus"]) + " = " + str(e_score) + "]\n"
+
+        if p_score > e_score:
+            dmg_to_monster = random.randint(10, 25)
+            monster_hp = max(0, monster_hp - dmg_to_monster)
+            log += "💥 " + pname + " наносит -" + str(dmg_to_monster) + " монстру (HP монстра: " + str(monster_hp) + "/" + str(monster_max_hp) + ")\n"
+        elif e_score > p_score:
+            dmg_to_player = random.randint(8, 20)
+            player_hp = max(10, player_hp - dmg_to_player)
+            log += "💀 Монстр наносит -" + str(dmg_to_player) + " игроку (HP: " + str(player_hp) + "/" + str(p["max_hp"]) + ")\n"
+        else:
+            log += "🤝 Ничья в раунде!\n"
+
+        if monster_hp <= 0:
+            winner = "player"
+            break
+        if player_hp <= p["max_hp"] * 0.1:  # игрок почти мёртв
+            winner = "monster"
+            break
+
+        log += "\n"
+
+    # Применяем итоговый HP
+    p["hp"] = player_hp
+
+    log += "\n━━━━━━━━━━━━━━\n"
+    if winner == "player" or (winner is None and monster_hp < monster_max_hp // 2):
+        # Победил игрок (или нанёс больше урона за 6 раундов)
+        if winner is None:
+            log += "🏆 " + pname + " продержался все 6 раундов и победил по очкам!\n"
+        else:
+            log += "🏆 " + pname + " победил! Монстр повержен!\n"
         p["wins"] = p.get("wins", 0) + 1
-        log += "🏆 " + pname + " победил! Монстр повержен."
         if random.random() < DROP_CHANCE:
             drop_id = random.choice(ITEM_KEYS)
             p["inventory"].append(drop_id)
-            log += "\n🎁 " + pname + " подобрал: " + item_name(drop_id) + "\n└ " + item_desc(drop_id)
-    elif e_score > p_score:
-        dmg = random.randint(15, 30)
-        p["hp"] = max(10, p["hp"] - dmg)
-        p["losses"] = p.get("losses", 0) + 1
-        log += "💀 " + pname + " проиграл! -" + str(dmg) + " HP (осталось " + str(p["hp"]) + "/" + str(p["max_hp"]) + ")"
+            log += "🎁 " + pname + " подобрал: " + item_name(drop_id) + "\n└ " + item_desc(drop_id) + "\n"
     else:
-        log += "🤝 Ничья! " + pname + " и " + m_name + " разошлись."
+        log += "💀 " + pname + " проиграл после " + str(rnd) + " раундов!\n"
+        p["losses"] = p.get("losses", 0) + 1
+
+    log += "\n❤️ HP: " + str(p["hp"]) + "/" + str(p["max_hp"]) + "  💙 MP: " + str(p["mp"]) + "/" + str(p["max_mp"])
 
     save_data()
     bot.edit_message_text(
@@ -1135,7 +1204,7 @@ def _start_brawl_menu(call):
     name = call.from_user.first_name
     sent = bot.send_message(
         call.message.chat.id,
-        "⚔️⚔️ ГРУППОВАЯ БИТВА\n\nОрганизатор: " + name + "\nИгроков: 1/4\n\nЖди, пока другие присоединятся!",
+        "⚔️⚔️ ГРУППОВАЯ БИТВА\n\nОрганизатор: " + name + "\nИгроков: 1/10\n\nЖди, пока другие присоединятся!",
         reply_markup=markup
     )
     active_brawl[brawl_id]["msg_id"] = sent.message_id
@@ -1172,7 +1241,7 @@ def start_brawl_cmd(message):
     name = message.from_user.first_name
     sent = bot.send_message(
         message.chat.id,
-        "⚔️⚔️ ГРУППОВАЯ БИТВА\n\nОрганизатор: " + name + "\nИгроков: 1/4\n\nЖди, пока другие присоединятся!",
+        "⚔️⚔️ ГРУППОВАЯ БИТВА\n\nОрганизатор: " + name + "\nИгроков: 1/10\n\nЖди, пока другие присоединятся!",
         reply_markup=markup
     )
     active_brawl[brawl_id]["msg_id"] = sent.message_id
@@ -1206,8 +1275,8 @@ def handle_brawl(call):
         if user_data[uid]["race"] is None:
             bot.answer_callback_query(call.id, "Сначала выбери расу /race", show_alert=True)
             return
-        if len(brawl["players"]) >= 4:
-            bot.answer_callback_query(call.id, "Лобби полное! Максимум 4 игрока.", show_alert=True)
+        if len(brawl["players"]) >= 10:
+            bot.answer_callback_query(call.id, "Лобби полное! Максимум 10 игроков.", show_alert=True)
             return
         brawl["players"].append(uid)
         # Обновляем сообщение лобби
@@ -1217,7 +1286,7 @@ def handle_brawl(call):
             lines.append(get_name(pid) + " — " + get_race_display(p["race"]))
         text = (
             "⚔️⚔️ ГРУППОВАЯ БИТВА\n\n"
-            "Игроков: " + str(len(brawl["players"])) + "/4\n\n"
+            "Игроков: " + str(len(brawl["players"])) + "/10\n\n"
             + "\n".join(lines) +
             "\n\nЖди, пока организатор начнёт бой!"
         )
