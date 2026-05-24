@@ -53,14 +53,19 @@ MONSTERS_DB = {
     "Томатость 🍅": {"type": "всё", "bonus": 4, "desc": "выглядит нелепо"}
 }
 
+# Каждый предмет: name, описание эффекта, логика в handle_item_use
 ITEMS_DB = {
-    "sword": "Сломанный меч 🗡️",
-    "juice": "Томатный сок 🥤",
-    "crown": "Корона Ютуки 👑",
-    "boots": "Дырявый сапог 👞",
-    "potion": "Странное зелье 🧪",
-    "shield": "Титановый щит 🛡️"
+    "sword":   {"name": "Сломанный меч 🗡️",    "desc": "+3 боевой бонус навсегда"},
+    "juice":   {"name": "Томатный сок 🥤",       "desc": "Полное восстановление HP и MP"},
+    "crown":   {"name": "Корона Ютуки 👑",        "desc": "+5 боевой бонус навсегда"},
+    "boots":   {"name": "Дырявые сапоги 👞",      "desc": "+3 ловкость навсегда"},
+    "potion":  {"name": "Странное зелье 🧪",      "desc": "50/50: +30 HP или -20 HP"},
+    "shield":  {"name": "Титановый щит 🛡️",       "desc": "+20 к максимальному HP"},
+    "tome":    {"name": "Мистический том 📖",     "desc": "+20 к максимальному MP"},
+    "amulet":  {"name": "Амулет удачи 🍀",        "desc": "Следующий бросок гарантированно 15+"},
 }
+
+ITEM_KEYS = list(ITEMS_DB.keys())
 
 FUNNY_ACTIONS = [
     "случайно ломает стол в таверне",
@@ -68,6 +73,9 @@ FUNNY_ACTIONS = [
     "кричит, что Ютуки — величайший",
     "пытается сделать сальто в грязь"
 ]
+
+# Шанс дропа предмета с монстра (30%)
+DROP_CHANCE = 0.30
 
 
 # ─── сохранение / загрузка ────────────────────────────────────────────────────
@@ -78,8 +86,10 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            # ключи в JSON — строки, конвертируем обратно в int
             user_data = {int(k): v for k, v in raw.items()}
+            # Добавляем новые поля если их нет (миграция)
+            for uid, p in user_data.items():
+                p.setdefault("lucky_amulet", False)
             print("Данные загружены: " + str(len(user_data)) + " игроков")
         except Exception as e:
             print("Ошибка загрузки данных: " + str(e))
@@ -105,7 +115,8 @@ def init_user(uid):
             "max_mp": 50, "mp": 50, "dexterity": 10,
             "combat_bonus": 0, "inventory": [],
             "last_loot_time": 0, "last_action_time": 0,
-            "roll_buff": 0, "roll_buff_time": 0
+            "roll_buff": 0, "roll_buff_time": 0,
+            "lucky_amulet": False
         }
         save_data()
 
@@ -130,6 +141,14 @@ def get_active_roll_buff(uid):
     return 0
 
 
+def item_name(it_id):
+    return ITEMS_DB.get(it_id, {}).get("name", "Предмет 📦")
+
+
+def item_desc(it_id):
+    return ITEMS_DB.get(it_id, {}).get("desc", "")
+
+
 def main_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton("📋 Меню"))
@@ -137,18 +156,15 @@ def main_keyboard():
 
 
 def menu_inline():
-    markup = InlineKeyboardMarkup()
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("👤 Мой герой", callback_data="menu_hero"),
-        InlineKeyboardButton("🎒 Инвентарь", callback_data="menu_bag")
-    )
-    markup.add(
-        InlineKeyboardButton("⚔️ Битва", callback_data="menu_fight"),
-        InlineKeyboardButton("🎲 Бросить кубик", callback_data="menu_roll")
-    )
-    markup.add(
-        InlineKeyboardButton("📦 Открыть сундук", callback_data="menu_loot"),
-        InlineKeyboardButton("🎭 Сменить класс", callback_data="menu_race")
+        InlineKeyboardButton("🎒 Инвентарь",  callback_data="menu_bag"),
+        InlineKeyboardButton("⚔️ Битва",       callback_data="menu_fight"),
+        InlineKeyboardButton("🎲 Кубик d20",   callback_data="menu_roll"),
+        InlineKeyboardButton("📦 Сундук",       callback_data="menu_loot"),
+        InlineKeyboardButton("🎭 Сменить класс",callback_data="menu_race"),
+        InlineKeyboardButton("🎪 Случайное действие", callback_data="menu_action"),
     )
     return markup
 
@@ -161,23 +177,47 @@ def send_welcome(message):
     init_user(uid)
     txt = (
         "Добро пожаловать в игру!\n\n"
-        "Нажми кнопку 📋 Меню внизу экрана — там всё нужное.\n\n"
-        "Или используй команды напрямую:\n"
+        "Нажми кнопку 📋 Меню внизу — там всё нужное.\n\n"
+        "Команды:\n"
         "/race — выбрать / сменить класс\n"
         "/fight — битва с монстром\n"
         "/pvp — дуэль (ответом на сообщение)\n"
         "/loot — открыть сундук (кд 2 часа)\n"
-        "/action — глупое действие (кд 3 мин)\n"
-        "/roll — бросить d20"
+        "/action — случайное действие (кд 3 мин)\n"
+        "/roll — бросить d20\n"
+        "/items — список всех предметов"
     )
     bot.send_message(message.chat.id, txt, reply_markup=main_keyboard())
+
+
+# ─── /items — справочник предметов ───────────────────────────────────────────
+
+@bot.message_handler(commands=["items"])
+def show_items_list(message):
+    txt = "Все предметы в игре:\n\n"
+    for it_id, info in ITEMS_DB.items():
+        txt += info["name"] + "\n  " + info["desc"] + "\n\n"
+    bot.send_message(message.chat.id, txt)
 
 
 # ─── Кнопка "📋 Меню" ─────────────────────────────────────────────────────────
 
 @bot.message_handler(func=lambda m: m.text == "📋 Меню")
 def show_menu(message):
-    bot.send_message(message.chat.id, "Выбери действие:", reply_markup=menu_inline())
+    uid = message.from_user.id
+    init_user(uid)
+    p = user_data[uid]
+    if p["race"]:
+        header = (
+            get_race_display(p["race"]) + "\n"
+            "HP: " + str(p["hp"]) + "/" + str(p["max_hp"]) + "  "
+            "MP: " + str(p["mp"]) + "/" + str(p["max_mp"]) + "\n"
+            "Предметов в сумке: " + str(len(p["inventory"])) + "\n\n"
+            "Выбери действие:"
+        )
+    else:
+        header = "Герой не создан. Выбери класс!\n\nВыбери действие:"
+    bot.send_message(message.chat.id, header, reply_markup=menu_inline())
 
 
 # ─── Обработка кнопок меню ────────────────────────────────────────────────────
@@ -207,7 +247,7 @@ def handle_menu_action(call):
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            text="Враг близко! Атакуй:",
+            text="Враг близко! Выбери атаку:",
             reply_markup=markup
         )
 
@@ -220,6 +260,29 @@ def handle_menu_action(call):
     elif action == "race":
         _show_race_selection(call.message.chat.id, uid, edit_msg=call.message)
 
+    elif action == "action":
+        _do_action_inline(call)
+
+
+def _do_action_inline(call):
+    uid = call.from_user.id
+    p = user_data[uid]
+    cur = time.time()
+    last = p["last_action_time"]
+    if cur - last < 180:
+        rem = int(180 - (cur - last))
+        bot.answer_callback_query(call.id, "Жди " + str(rem) + " сек ⏱️", show_alert=True)
+        return
+    p["last_action_time"] = cur
+    save_data()
+    act = random.choice(FUNNY_ACTIONS)
+    name = call.from_user.first_name
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=name + " " + act + " 🎲\n\nНажми 📋 Меню чтобы вернуться."
+    )
+
 
 # ─── Выбор / смена расы ───────────────────────────────────────────────────────
 
@@ -228,16 +291,15 @@ def _show_race_selection(chat_id, uid, edit_msg=None):
     markup = InlineKeyboardMarkup()
     for i, race_key in enumerate(RACE_KEYS):
         display = get_race_display(race_key)
-        # Помечаем текущий класс звёздочкой
         if p["race"] == race_key:
-            display = display + " (текущий)"
+            display = display + " ✅"
         markup.add(InlineKeyboardButton(display, callback_data="r" + str(i)))
     if p["race"] is not None:
         text = (
             "Текущий класс: " + get_race_display(p["race"]) + "\n\n"
-            "Смена класса сохранит инвентарь и бонусы,\n"
+            "При смене сохранятся инвентарь и бонусы,\n"
             "но HP и MP сбросятся по новым статам.\n\n"
-            "Выбери новый класс:"
+            "Выбери класс:"
         )
     else:
         text = "Выбери класс:"
@@ -270,25 +332,21 @@ def handle_race_selection(call):
     p = user_data[uid]
     old_race = p["race"]
     st = RACE_STATS[race]
-
-    # Сохраняем инвентарь и бонус, сбрасываем HP/MP/ловкость по новым статам
     p["race"] = race
     p["max_hp"] = st["hp"]
     p["hp"] = st["hp"]
     p["max_mp"] = st["mp"]
     p["mp"] = st["mp"]
     p["dexterity"] = st["dex"]
-    # roll_buff и combat_bonus сохраняются
-
     save_data()
-
     display = get_race_display(race)
     if old_race is None:
         log = (
-            "СОЗДАН: " + display + "\n"
+            "СОЗДАН: " + display + "\n\n"
             "HP: " + str(st["hp"]) + "\n"
             "MP: " + str(st["mp"]) + "\n"
-            "Ловкость: " + str(st["dex"])
+            "Ловкость: " + str(st["dex"]) + "\n\n"
+            "Нажми 📋 Меню чтобы начать!"
         )
     else:
         log = (
@@ -312,7 +370,7 @@ def handle_race_selection(call):
 def _send_hero_info(chat_id, uid, edit_msg=None):
     p = user_data[uid]
     if p["race"] is None:
-        text = "У тебя еще нет героя. Нажми Сменить класс в меню или напиши /race"
+        text = "У тебя еще нет героя. Выбери класс через меню или /race"
         if edit_msg:
             bot.edit_message_text(chat_id=chat_id, message_id=edit_msg.message_id, text=text)
         else:
@@ -321,9 +379,10 @@ def _send_hero_info(chat_id, uid, edit_msg=None):
     rb = get_active_roll_buff(uid)
     b_txt = ""
     if rb > 0:
-        b_txt = " (бафф +{} от кубика!)".format(rb)
+        b_txt = " (бафф +" + str(rb) + " от кубика!)"
     elif rb < 0:
-        b_txt = " (дебафф {})".format(rb)
+        b_txt = " (дебафф " + str(rb) + ")"
+    lucky = " (амулет активен!)" if p.get("lucky_amulet") else ""
     display = get_race_display(p["race"])
     msg = (
         "ГЕРОЙ: " + display + "\n\n"
@@ -332,7 +391,8 @@ def _send_hero_info(chat_id, uid, edit_msg=None):
         "MP: " + str(p["mp"]) + "/" + str(p["max_mp"]) + "\n"
         + make_bar(p["mp"], p["max_mp"], "🟦") + "\n\n"
         "Ловкость: " + str(p["dexterity"]) + "\n"
-        "Бонус вещей: +" + str(p["combat_bonus"]) + b_txt
+        "Боевой бонус: +" + str(p["combat_bonus"]) + b_txt + "\n"
+        "Предметов: " + str(len(p["inventory"])) + lucky
     )
     if edit_msg:
         bot.edit_message_text(chat_id=chat_id, message_id=edit_msg.message_id, text=msg)
@@ -354,13 +414,15 @@ def _send_bag(chat_id, uid, edit_msg=None):
         counts[it] = counts.get(it, 0) + 1
     markup = InlineKeyboardMarkup()
     for it_id, count in counts.items():
-        name = ITEMS_DB.get(it_id, "Предмет 📦")
-        markup.add(InlineKeyboardButton(name + " x" + str(count), callback_data="use" + it_id))
+        name = item_name(it_id)
+        desc = item_desc(it_id)
+        label = name + " x" + str(count) + "  [" + desc + "]"
+        markup.add(InlineKeyboardButton(label, callback_data="use" + it_id))
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=edit_msg.message_id,
-            text="Твой инвентарь:",
+            text="Твой инвентарь (нажми предмет чтобы использовать):",
             reply_markup=markup
         )
     else:
@@ -368,7 +430,15 @@ def _send_bag(chat_id, uid, edit_msg=None):
 
 
 def _do_roll(chat_id, uid, edit_msg=None):
-    res = random.randint(1, 20)
+    p = user_data[uid]
+    # Амулет удачи гарантирует 15+
+    if p.get("lucky_amulet"):
+        res = random.randint(15, 20)
+        p["lucky_amulet"] = False
+        amulet_txt = "Амулет удачи сработал! 🍀\n"
+    else:
+        res = random.randint(1, 20)
+        amulet_txt = ""
     if res == 20:
         b, st = 6, "КРИТ УСПЕХ! Мощный бафф! 🔥"
     elif res >= 15:
@@ -377,11 +447,12 @@ def _do_roll(chat_id, uid, edit_msg=None):
         b, st = 2, "Нормальный бросок. Чуть силы. 👍"
     else:
         b, st = -2, "КРИТ НЕУДАЧА! Дебафф! 💀"
-    user_data[uid]["roll_buff"] = b
-    user_data[uid]["roll_buff_time"] = time.time()
+    p["roll_buff"] = b
+    p["roll_buff_time"] = time.time()
     save_data()
     sign = "+" if b >= 0 else ""
     log = (
+        amulet_txt +
         "На d20 выпало: " + str(res) + " 🎲\n\n"
         + st + "\n"
         "Эффект: Модификатор " + sign + str(b) + " на 5 минут!"
@@ -399,12 +470,11 @@ def _do_loot(chat_id, uid, edit_msg=None):
         rem = int(7200 - (cur - last))
         text = "Жди " + str(rem // 3600) + "ч " + str((rem % 3600) // 60) + "м ⏱️"
     else:
-        l_id = random.choice(list(ITEMS_DB.keys()))
+        l_id = random.choice(ITEM_KEYS)
         user_data[uid]["inventory"].append(l_id)
         user_data[uid]["last_loot_time"] = cur
         save_data()
-        name = ITEMS_DB[l_id]
-        text = "Найдено: " + name + "! Ищи в инвентаре 📦"
+        text = "Найдено: " + item_name(l_id) + "\n" + item_desc(l_id) + "\n\nИщи в инвентаре 📦"
     if edit_msg:
         bot.edit_message_text(chat_id=chat_id, message_id=edit_msg.message_id, text=text)
     else:
@@ -436,27 +506,64 @@ def handle_item_use(call):
     p = user_data[uid]
     it_id = call.data[3:]
     if it_id not in p["inventory"]:
-        bot.answer_callback_query(call.id, "Не найдено.")
+        bot.answer_callback_query(call.id, "Предмет не найден.")
         return
     p["inventory"].remove(it_id)
-    name = ITEMS_DB.get(it_id, "Предмет")
+    name = item_name(it_id)
     f_name = call.from_user.first_name
-    log = f_name + " юзает: " + name + "\n\n"
+    log = f_name + " использует: " + name + "\n\n"
+
     if it_id == "juice":
-        p["hp"], p["mp"] = p["max_hp"], p["max_mp"]
-        log += "Полное восстановление HP и MP! 🥤"
+        # Полное восстановление HP и MP
+        p["hp"] = p["max_hp"]
+        p["mp"] = p["max_mp"]
+        log += "Выпит до дна! HP и MP полностью восстановлены. 🥤"
+
     elif it_id == "potion":
+        # 50/50
         if random.choice([True, False]):
-            p["hp"] = p["max_hp"]
-            log += "Зелье целебное! HP восстановлено! 🧪"
+            heal = 30
+            p["hp"] = min(p["max_hp"], p["hp"] + heal)
+            log += "Зелье оказалось целебным! +" + str(heal) + " HP. 🧪"
         else:
             p["hp"] = max(10, p["hp"] - 20)
-            log += "Зелье ядовитое! Потеряно 20 HP! 🤢"
-    elif it_id in ["sword", "shield", "crown"]:
-        p["combat_bonus"] += 2
-        log += "Бонус к броскам увеличен на +2! ⚔️"
+            log += "Зелье оказалось ядовитым! -20 HP. 🤢"
+
+    elif it_id == "sword":
+        # +3 боевой бонус
+        p["combat_bonus"] += 3
+        log += "Меч заточен (кое-как). Боевой бонус +3. 🗡️"
+
+    elif it_id == "shield":
+        # +20 к макс HP
+        p["max_hp"] += 20
+        p["hp"] = min(p["hp"] + 20, p["max_hp"])
+        log += "Щит надет. Максимальный HP +20. 🛡️"
+
+    elif it_id == "crown":
+        # +5 боевой бонус
+        p["combat_bonus"] += 5
+        log += "Корона Ютуки надета. Боевой бонус +5. 👑"
+
+    elif it_id == "boots":
+        # +3 ловкость
+        p["dexterity"] += 3
+        log += "Сапоги надеты (дырки не мешают). Ловкость +3. 👞"
+
+    elif it_id == "tome":
+        # +20 к макс MP
+        p["max_mp"] += 20
+        p["mp"] = min(p["mp"] + 20, p["max_mp"])
+        log += "Том прочитан. Максимальный MP +20. 📖"
+
+    elif it_id == "amulet":
+        # Следующий бросок 15+
+        p["lucky_amulet"] = True
+        log += "Амулет активирован! Следующий бросок d20 будет 15+. 🍀"
+
     else:
-        log += "Вы надели дырявый сапог. Весело! 👞"
+        log += "Предмет использован... и ничего не произошло."
+
     save_data()
     bot.edit_message_text(
         chat_id=call.message.chat.id,
@@ -479,7 +586,7 @@ def start_fight(message):
         InlineKeyboardButton("Физ. удар ⚔️", callback_data="pvep"),
         InlineKeyboardButton("Магия (-15 MP) 🔮", callback_data="pvem")
     )
-    bot.send_message(message.chat.id, "Враг близко! Атакуй:", reply_markup=markup)
+    bot.send_message(message.chat.id, "Враг близко! Выбери атаку:", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ["pvep", "pvem"])
@@ -500,7 +607,7 @@ def handle_pve(call):
         p_score = p_dice + p["dexterity"] + total_bonus
         e_score = e_dice + m_info["bonus"]
         log += "Ты " + RACE_COMBAT[p["race"]]["phys"] + "\n"
-        log += "Твой бросок: " + str(p_dice) + "+" + str(p["dexterity"]) + "+" + str(total_bonus) + " = " + str(p_score) + "\n"
+        log += "Бросок: " + str(p_dice) + "+" + str(p["dexterity"]) + "+" + str(total_bonus) + " = " + str(p_score) + "\n"
     else:
         p["mp"] -= 15
         p_score = p_dice + 15 + total_bonus
@@ -508,14 +615,21 @@ def handle_pve(call):
         log += "Ты " + RACE_COMBAT[p["race"]]["magic"] + "\n"
         log += "Магия: " + str(p_dice) + "+15+" + str(total_bonus) + " = " + str(p_score) + "\n"
     log += "Монстр: " + str(e_dice) + "+" + str(m_info["bonus"]) + " = " + str(e_score) + "\n\n"
+
     if p_score > e_score:
         log += "ПОБЕДА! Монстр повержен. 🏆"
+        # Дроп предмета с шансом DROP_CHANCE
+        if random.random() < DROP_CHANCE:
+            drop_id = random.choice(ITEM_KEYS)
+            p["inventory"].append(drop_id)
+            log += "\n\nМонстр обронил: " + item_name(drop_id) + " 🎁\nЗабери в инвентаре!"
     elif e_score > p_score:
         dmg = random.randint(15, 30)
         p["hp"] = max(10, p["hp"] - dmg)
         log += "ПРОИГРЫШ! Потеряно " + str(dmg) + " HP 💀"
     else:
         log += "НИЧЬЯ! Вы разошлись. 🤝"
+
     save_data()
     bot.edit_message_text(
         chat_id=call.message.chat.id,
@@ -546,7 +660,7 @@ def start_pvp(message):
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("Физ. защита ⚔️", callback_data="duelp" + b_id),
-        InlineKeyboardButton("Маг. защита 🔮", callback_data="duelm" + b_id)
+        InlineKeyboardButton("Маг. защита 🔮",  callback_data="duelm" + b_id)
     )
     def_name = message.reply_to_message.from_user.first_name
     bot.send_message(message.chat.id, "Вызов для " + def_name + "! Выбери тип защиты:", reply_markup=markup)
