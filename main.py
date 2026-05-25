@@ -3,7 +3,7 @@ import time
 import json
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from flask import Flask
 from threading import Thread
 
@@ -364,14 +364,6 @@ def handle_menu_page(call):
     bot.answer_callback_query(call.id)
 
 
-# ─── Нижняя клавиатура ────────────────────────────────────────────────────────
-
-def main_keyboard():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(KeyboardButton("📋 Меню"))
-    return markup
-
-
 # ─── /start и /help ───────────────────────────────────────────────────────────
 
 @bot.message_handler(commands=["start", "help"])
@@ -382,7 +374,7 @@ def send_welcome(message):
         "🎮 Добро пожаловать в игру!\n\n"
         "📋 Список команд:\n"
         "┌ /race — выбрать / сменить класс\n"
-        "├ /fight — битва с монстром (PvE до 6 раундов)\n"
+        "├ /fight — битва с монстром (PvE до 3 раундов)\n"
         "├ /pvp — дуэль (ответом на сообщение игрока)\n"
         "├ /brawl — групповая битва (до 10 игроков)\n"
         "├ /loot — сундук с добычей (кд 2 часа)\n"
@@ -393,9 +385,9 @@ def send_welcome(message):
         "├ /stats — твоя статистика\n"
         "├ /items — все предметы в игре\n"
         "└ /top — топ-10 игроков этой группы\n\n"
-        "Нажми 📋 Меню внизу — там всё то же самое в удобном виде!"
+        "Используй команды или нажимай кнопки в меню!"
     )
-    bot.send_message(message.chat.id, txt, reply_markup=main_keyboard())
+    bot.send_message(message.chat.id, txt, reply_markup=ReplyKeyboardRemove())
 
 
 # ─── /items ───────────────────────────────────────────────────────────────────
@@ -406,15 +398,6 @@ def show_items_list(message):
     for it_id, info in ITEMS_DB.items():
         txt += info["name"] + "\n  └ " + info["desc"] + "\n\n"
     bot.send_message(message.chat.id, txt)
-
-
-# ─── Кнопка "📋 Меню" ─────────────────────────────────────────────────────────
-
-@bot.message_handler(func=lambda m: m.text == "📋 Меню")
-def show_menu(message):
-    uid = message.from_user.id
-    init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
-    bot.send_message(message.chat.id, menu_header(uid), reply_markup=menu_inline_page(0))
 
 
 # ─── Обработка кнопок меню ────────────────────────────────────────────────────
@@ -546,7 +529,7 @@ def _send_stats(chat_id, uid, edit_msg=None):
     else:
         bot.send_message(chat_id, text)
 
-    # ── График побед над игроками ─────────────────────────────────────────────
+    # ── График побед над игроками (всегда отдельным сообщением) ───────────────
     if not HAS_MPL:
         return
     dates_raw = p.get("pvp_win_dates", [])
@@ -650,7 +633,7 @@ def handle_race_selection(call):
             "❤️ HP: " + str(st["hp"]) + "\n"
             "💙 MP: " + str(st["mp"]) + "\n"
             "⚡ Ловкость: " + str(st["dex"]) + "\n\n"
-            "Нажми 📋 Меню чтобы начать!"
+            "Нажми /fight чтобы начать!"
         )
     else:
         log = (
@@ -967,8 +950,7 @@ def handle_pve(call):
             atk_desc = RACE_COMBAT[p["race"]]["phys"]
             score_str = str(p_dice) + "+" + str(p["dexterity"]) + "+" + str(total_bonus)
         else:
-            if p["mp"] >= 15:
-                p["mp"] -= 15
+            p["mp"] -= 15
             p_score = p_dice + 15 + total_bonus
             atk_desc = RACE_COMBAT[p["race"]]["magic"]
             score_str = str(p_dice) + "+15+" + str(total_bonus)
@@ -1516,9 +1498,9 @@ def roll_cube(message):
 
 # ─── неизвестные сообщения ────────────────────────────────────────────────────
 
-@bot.message_handler(func=lambda message: not message.text.startswith("/") and message.text != "📋 Меню")
+@bot.message_handler(func=lambda message: message.text and not message.text.startswith("/"))
 def handle_unknown_messages(message):
-    bot.reply_to(message, "Напиши /help или нажми 📋 Меню ❓")
+    bot.reply_to(message, "Напиши /help для списка команд ❓")
 
 
 if __name__ == "__main__":
