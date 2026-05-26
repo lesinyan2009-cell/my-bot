@@ -6,6 +6,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from flask import Flask
 from threading import Thread
+from pymongo import MongoClient
 
 # ─── Flask — keep-alive для Render + UptimeRobot ─────────────────────────────
 app = Flask(__name__)
@@ -32,7 +33,10 @@ def regen_loop():
 
 # ─── Бот ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-DATA_FILE = "save_data.json"
+
+# ─── MongoDB ──────────────────────────────────────────────────────────────────
+_mongo_client = MongoClient(os.getenv('MONGO_URL'))
+_db = _mongo_client["gamebot"]
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -62,11 +66,16 @@ callback_spam = {}  # антиспам: uid -> {cb_data: timestamp}
 Thread(target=regen_loop, daemon=True).start()
 
 RACE_STATS = {
-    "Томатная эльфийка": {"hp": 90,  "mp": 70,  "dex": 14, "emoji": "🍅"},
-    "Брокен боб":         {"hp": 110, "mp": 40,  "dex": 11, "emoji": "🫘"},
-    "Какашливый гусеница":{"hp": 150, "mp": 20,  "dex": 8,  "emoji": "🐛"},
-    "Данилость":          {"hp": 85,  "mp": 100, "dex": 10, "emoji": "✨"},
-    "Ютуки величайший":   {"hp": 130, "mp": 80,  "dex": 5,  "emoji": "👑"},
+    # Ловкач: средний HP, средний MP, высокая ловкость — сила в физатаках
+    "Томатная эльфийка": {"hp": 100, "mp": 60,  "dex": 14, "emoji": "🍅"},
+    # Боец: высокий HP, низкий MP, средняя ловкость — баланс физ/маг
+    "Брокен боб":         {"hp": 120, "mp": 40,  "dex": 11, "emoji": "🫘"},
+    # Танк: очень высокий HP, минимум MP и ловкости — только физ, но живучий
+    "Какашливый гусеница":{"hp": 140, "mp": 20,  "dex": 8,  "emoji": "🐛"},
+    # Маг: низкий HP, очень высокий MP, средняя ловкость — сила в магии
+    "Данилость":          {"hp": 95,  "mp": 110, "dex": 10, "emoji": "✨"},
+    # Командир: выше среднего HP и MP, низкая ловкость — универсал
+    "Ютуки величайший":   {"hp": 115, "mp": 70,  "dex": 7,  "emoji": "👑"},
 }
 
 RACE_KEYS = list(RACE_STATS.keys())
@@ -80,12 +89,15 @@ RACE_COMBAT = {
 }
 
 MONSTERS_DB = {
-    "Мекзость 🧠":  {"type": "ум",   "bonus": 12, "desc": "хитрит мыслями"},
-    "Чорность 🔮":  {"type": "маг",  "bonus": 14, "desc": "бьет темной магией"},
-    "Размезность 💪":{"type": "сила","bonus": 16, "desc": "бьет кулачищами"},
-    "Томатость 🍅": {"type": "всё",  "bonus": 4,  "desc": "выглядит нелепо"},
-    "Пузырь 🫧":    {"type": "лёд",  "bonus": 10, "desc": "надувается и взрывается"},
-    "Грязнюха 🪣":  {"type": "яд",   "bonus": 13, "desc": "брызгается мусором"},
+    # Лёгкие (бонус 6–8) — хороши для старта
+    "Томатость 🍅":  {"type": "всё",  "bonus": 6,  "desc": "выглядит нелепо, но кусается"},
+    "Пузырь 🫧":    {"type": "лёд",  "bonus": 8,  "desc": "надувается и взрывается"},
+    # Средние (бонус 10–11) — основной контент
+    "Мекзость 🧠":  {"type": "ум",   "bonus": 10, "desc": "хитрит мыслями"},
+    "Грязнюха 🪣":  {"type": "яд",   "bonus": 11, "desc": "брызгается мусором"},
+    # Сложные (бонус 13–15) — вызов для прокачанных
+    "Чорность 🔮":  {"type": "маг",  "bonus": 13, "desc": "бьет темной магией"},
+    "Размезность 💪":{"type": "сила","bonus": 15, "desc": "бьет кулачищами"},
 }
 
 ITEMS_DB = {
@@ -137,26 +149,24 @@ DROP_CHANCE = 0.10  # 10% шанс дропа
 
 def load_data():
     global user_data, chat_members
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            user_data = {int(k): v for k, v in raw.get("users", raw).items()} if "users" in raw else {int(k): v for k, v in raw.items()}
-            # Загружаем chat_members если есть
-            if "chat_members" in raw:
-                chat_members = {int(cid): set(uids) for cid, uids in raw["chat_members"].items()}
+    try:
+        doc = _db.users.find_one({"_id": "gamestate"})
+        if doc:
+            user_data = {int(k): v for k, v in doc["users"].items()}
+            chat_members = {int(cid): set(uids) for cid, uids in doc.get("chat_members", {}).items()}
             for uid, p in user_data.items():
                 p.setdefault("lucky_amulet", False)
                 p.setdefault("wins", 0)
                 p.setdefault("losses", 0)
                 p.setdefault("pvp_wins", 0)
                 p.setdefault("pvp_win_dates", [])
-            print("Данные загружены: " + str(len(user_data)) + " игроков")
-        except Exception as e:
-            print("Ошибка загрузки данных: " + str(e))
+            print("Данные загружены из MongoDB: " + str(len(user_data)) + " игроков")
+        else:
             user_data = {}
             chat_members = {}
-    else:
+            print("MongoDB: новая база данных")
+    except Exception as e:
+        print("Ошибка загрузки из MongoDB: " + str(e))
         user_data = {}
         chat_members = {}
 
@@ -164,10 +174,13 @@ def load_data():
 def save_data():
     try:
         serializable_chat_members = {str(cid): list(uids) for cid, uids in chat_members.items()}
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"users": user_data, "chat_members": serializable_chat_members}, f, ensure_ascii=False, indent=2)
+        _db.users.replace_one(
+            {"_id": "gamestate"},
+            {"_id": "gamestate", "users": user_data, "chat_members": serializable_chat_members},
+            upsert=True
+        )
     except Exception as e:
-        print("Ошибка сохранения: " + str(e))
+        print("Ошибка сохранения в MongoDB: " + str(e))
 
 
 # ─── вспомогательные функции ──────────────────────────────────────────────────
