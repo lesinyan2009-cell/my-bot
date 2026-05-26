@@ -489,7 +489,7 @@ def _do_action_inline(call):
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         text="🎪 " + name + " " + act,
-        reply_markup=back_to_menu_markup(1)
+        reply_markup=back_to_menu_markup(0)
     )
 
 
@@ -524,7 +524,7 @@ def _send_stats(chat_id, uid, edit_msg=None):
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id, message_id=edit_msg.message_id, text=text,
-            reply_markup=back_to_menu_markup(1)
+            reply_markup=back_to_menu_markup(0)
         )
     else:
         bot.send_message(chat_id, text)
@@ -647,7 +647,7 @@ def handle_race_selection(call):
         )
     bot.edit_message_text(
         chat_id=call.message.chat.id, message_id=call.message.message_id, text=log,
-        reply_markup=back_to_menu_markup(1)
+        reply_markup=back_to_menu_markup(0)
     )
 
 
@@ -752,7 +752,7 @@ def _do_roll(chat_id, uid, edit_msg=None):
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id, message_id=edit_msg.message_id, text=log,
-            reply_markup=back_to_menu_markup(1)
+            reply_markup=back_to_menu_markup(0)
         )
     else:
         bot.send_message(chat_id, log)
@@ -787,7 +787,7 @@ def _do_loot(chat_id, uid, edit_msg=None, call=None):
     if edit_msg:
         bot.edit_message_text(
             chat_id=chat_id, message_id=edit_msg.message_id, text=text,
-            reply_markup=back_to_menu_markup(1)
+            reply_markup=back_to_menu_markup(0)
         )
     else:
         bot.send_message(chat_id, text)
@@ -1258,6 +1258,9 @@ def _start_brawl_menu(call):
         bot.answer_callback_query(call.id, "Сначала выбери расу!", show_alert=True)
         return
     brawl_id = "B" + str(uid)
+    if brawl_id in active_brawl:
+        bot.answer_callback_query(call.id, "У тебя уже есть активная битва! Сначала отмени её.", show_alert=True)
+        return
     active_brawl[brawl_id] = {
         "owner": uid,
         "players": [uid],
@@ -1283,6 +1286,9 @@ def _brawl_lobby_markup(brawl_id):
         InlineKeyboardButton("➕ Присоединиться", callback_data="brawl_join_" + brawl_id),
         InlineKeyboardButton("⚔️ Начать бой!",    callback_data="brawl_start_" + brawl_id),
     )
+    markup.add(
+        InlineKeyboardButton("❌ Отменить битву", callback_data="brawl_cancel_" + brawl_id),
+    )
     return markup
 
 
@@ -1295,6 +1301,9 @@ def start_brawl_cmd(message):
         bot.send_message(message.chat.id, "Сначала выбери расу через /race")
         return
     brawl_id = "B" + str(uid)
+    if brawl_id in active_brawl:
+        bot.send_message(message.chat.id, "⚠️ У тебя уже есть активная групповая битва! Сначала отмени её.")
+        return
     active_brawl[brawl_id] = {
         "owner": uid,
         "players": [uid],
@@ -1329,6 +1338,24 @@ def handle_brawl(call):
         return
 
     brawl = active_brawl[brawl_id]
+
+    # ── отменить битву (только организатор, фаза lobby) ──────────────────────
+    if action == "cancel":
+        if uid != brawl["owner"]:
+            bot.answer_callback_query(call.id, "Только организатор может отменить битву!", show_alert=True)
+            return
+        if brawl["phase"] != "lobby":
+            bot.answer_callback_query(call.id, "Битву нельзя отменить — она уже идёт!", show_alert=True)
+            return
+        del active_brawl[brawl_id]
+        bot.edit_message_text(
+            chat_id=brawl["chat_id"],
+            message_id=brawl["msg_id"],
+            text="❌ Групповая битва отменена организатором.",
+            reply_markup=back_to_menu_markup(0)
+        )
+        bot.answer_callback_query(call.id, "Битва отменена.")
+        return
 
     # ── присоединиться ────────────────────────────────────────────────────────
     if action == "join":
@@ -1417,6 +1444,8 @@ def handle_brawl(call):
 
 def _resolve_brawl(brawl_id):
     brawl = active_brawl[brawl_id]
+    chat_id = brawl["chat_id"]
+    msg_id  = brawl["msg_id"]
     scores = {}
     details = []
     for uid in brawl["players"]:
@@ -1477,8 +1506,8 @@ def _resolve_brawl(brawl_id):
     save_data()
     del active_brawl[brawl_id]
     bot.edit_message_text(
-        chat_id=brawl["chat_id"],
-        message_id=brawl["msg_id"],
+        chat_id=chat_id,
+        message_id=msg_id,
         text=log,
         reply_markup=back_to_menu_markup(0)
     )
