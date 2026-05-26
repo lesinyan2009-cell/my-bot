@@ -25,11 +25,14 @@ Thread(target=run_flask, daemon=True).start()
 def regen_loop():
     while True:
         time.sleep(300)  # 5 минут
+        changed = False
         for uid, p in list(user_data.items()):
             if p.get("race"):
                 p["hp"] = min(p["max_hp"], p["hp"] + 10)
                 p["mp"] = min(p["max_mp"], p["mp"] + 10)
-        save_data()
+                changed = True
+        if changed:
+            save_data()
 
 # ─── Бот ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -62,8 +65,6 @@ chat_members = {}  # chat_id -> set of uid — кто играл в этом ч�
 active_pvp = {}   # одиночные дуэли
 active_brawl = {} # многопользовательские битвы
 callback_spam = {}  # антиспам: uid -> {cb_data: timestamp}
-
-Thread(target=regen_loop, daemon=True).start()
 
 RACE_STATS = {
     # Ловкач: средний HP, средний MP, высокая ловкость — сила в физатаках
@@ -173,10 +174,11 @@ def load_data():
 
 def save_data():
     try:
+        serializable_users = {str(uid): p for uid, p in user_data.items()}
         serializable_chat_members = {str(cid): list(uids) for cid, uids in chat_members.items()}
         _db.users.replace_one(
             {"_id": "gamestate"},
-            {"_id": "gamestate", "users": user_data, "chat_members": serializable_chat_members},
+            {"_id": "gamestate", "users": serializable_users, "chat_members": serializable_chat_members},
             upsert=True
         )
     except Exception as e:
@@ -200,6 +202,7 @@ def init_user(uid, name=None, chat_id=None):
         save_data()
     elif name:
         user_data[uid]["name"] = name
+        save_data()
     # Регистрируем игрока в чате
     if chat_id and chat_id < 0:  # только группы (chat_id < 0)
         if chat_id not in chat_members:
@@ -225,8 +228,9 @@ def make_bar(cur, max_v, emoji):
 
 
 def get_active_roll_buff(uid):
-    init_user(uid)
-    p = user_data[uid]
+    p = user_data.get(uid)
+    if p is None:
+        return 0
     if time.time() - p["roll_buff_time"] < 300:
         return p["roll_buff"]
     return 0
@@ -454,12 +458,14 @@ def handle_menu_action(call):
 
     elif action == "loot":
         _do_loot(call.message.chat.id, uid, edit_msg=call.message, call=call)
+        return  # _do_loot answers callback internally
 
     elif action == "race":
         _show_race_selection(call.message.chat.id, uid, edit_msg=call.message)
 
     elif action == "action":
         _do_action_inline(call)
+        return  # _do_action_inline answers callback internally
 
     elif action == "stats":
         _send_stats(call.message.chat.id, uid, edit_msg=call.message)
@@ -482,6 +488,7 @@ def handle_menu_action(call):
 
     elif action == "brawl":
         _start_brawl_menu(call)
+        return  # _start_brawl_menu answers callback internally
 
     bot.answer_callback_query(call.id)
 
@@ -522,12 +529,13 @@ def _send_stats(chat_id, uid, edit_msg=None):
     wins = p.get("wins", 0)
     losses = p.get("losses", 0)
     pvp_wins = p.get("pvp_wins", 0)
+    pve_wins = wins - pvp_wins
     total_pvp = pvp_wins + losses
     ratio = str(round(pvp_wins / total_pvp * 100)) + "%" if total_pvp > 0 else "N/A"
     text = (
         "🏆 СТАТИСТИКА — " + get_name(uid) + "\n\n"
         "Победы над игроками: " + str(pvp_wins) + " 🏅\n"
-        "Победы над монстрами: " + str(wins - pvp_wins) + " 👹\n"
+        "Победы над монстрами: " + str(pve_wins) + " 👹\n"
         "Поражения: " + str(losses) + " 💀\n"
         "Всего боёв: " + str(wins + losses) + "\n"
         "Винрейт (над игроками): " + ratio
@@ -1567,5 +1575,6 @@ def handle_unknown_messages(message):
 
 if __name__ == "__main__":
     load_data()
+    Thread(target=regen_loop, daemon=True).start()
     print("Бот успешно запущен...")
     bot.infinity_polling()
