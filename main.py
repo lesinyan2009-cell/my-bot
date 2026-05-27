@@ -133,6 +133,9 @@ def load_data():
                 p.setdefault("losses", 0)
                 p.setdefault("pvp_wins", 0)
                 p.setdefault("pvp_win_dates", [])
+                p["last_loot_time"] = p.get("last_loot_time") or 0
+                p["last_action_time"] = p.get("last_action_time") or 0
+                p["roll_buff_time"] = p.get("roll_buff_time") or 0
             print("Данные загружены из MongoDB: " + str(len(user_data)) + " игроков")
         else:
             user_data = {}
@@ -214,8 +217,9 @@ def get_active_roll_buff(uid):
     p = user_data.get(uid)
     if p is None:
         return 0
-    if time.time() - p["roll_buff_time"] < 300:
-        return p["roll_buff"]
+    last = p.get("roll_buff_time") or 0
+    if time.time() - last < 300:
+        return p.get("roll_buff") or 0
     return 0
 
 
@@ -246,7 +250,7 @@ ANTISPAM_DELAY = 0.5
 
 def check_spam(uid, cb_data=None):
     now = time.time()
-    last = callback_spam.get(uid, 0)
+    last = callback_spam.get(uid) or 0
     if now - last < ANTISPAM_DELAY:
         return True
     callback_spam[uid] = now
@@ -468,8 +472,9 @@ def _do_action_inline(call):
     uid = call.from_user.id
     p = user_data[uid]
     cur = time.time()
-    if cur - p["last_action_time"] < 180:
-        rem = int(180 - (cur - p["last_action_time"]))
+    last = p.get("last_action_time") or 0
+    if cur - last < 180:
+        rem = int(180 - (cur - last))
         bot.answer_callback_query(call.id, "Жди " + str(rem) + " сек ⏱️", show_alert=True)
         return
     p["last_action_time"] = cur
@@ -762,7 +767,7 @@ def _do_roll(chat_id, uid, edit_msg=None):
 
 def _do_loot(chat_id, uid, edit_msg=None, call=None):
     cur = time.time()
-    last = user_data[uid]["last_loot_time"]
+    last = user_data[uid].get("last_loot_time") or 0
     if cur - last < 7200:
         rem = int(7200 - (cur - last))
         cd_text = "⏱️ Сундук закрыт! Жди " + str(rem // 3600) + "ч " + str((rem % 3600) // 60) + "м"
@@ -1504,7 +1509,7 @@ def do_action(message):
     uid = message.from_user.id
     init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     cur = time.time()
-    last = user_data[uid]["last_action_time"]
+    last = user_data[uid].get("last_action_time") or 0
     if cur - last < 180:
         rem = int(180 - (cur - last))
         _send(message.chat.id, "⏱️ Жди " + str(rem) + " сек")
