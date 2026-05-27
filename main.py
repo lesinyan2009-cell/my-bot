@@ -41,30 +41,13 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 _mongo_client = MongoClient(os.getenv('MONGO_URL'))
 _db = _mongo_client["gamebot"]
 
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# ─── Список команд (подсказка при вводе /) ────────────────────────────────────
-bot.set_my_commands([
-    telebot.types.BotCommand("/race",    "выбрать / сменить класс"),
-    telebot.types.BotCommand("/fight",   "битва с монстром (PvE до 3 раундов)"),
-    telebot.types.BotCommand("/pvp",     "дуэль 1 на 1 (ответом на сообщение)"),
-    telebot.types.BotCommand("/brawl",   "групповая битва (до 10 игроков)"),
-    telebot.types.BotCommand("/loot",    "открыть сундук (кд 2 часа)"),
-    telebot.types.BotCommand("/action",  "случайное действие (кд 3 мин)"),
-    telebot.types.BotCommand("/roll",    "бросить кубик d20"),
-    telebot.types.BotCommand("/my_hero", "карточка героя"),
-    telebot.types.BotCommand("/bag",     "инвентарь"),
-    telebot.types.BotCommand("/stats",   "твоя статистика"),
-    telebot.types.BotCommand("/items",   "все предметы в игре"),
-    telebot.types.BotCommand("/top",     "топ-10 игроков группы"),
-    telebot.types.BotCommand("/help",    "помощь"),
-])
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=4)
 
 user_data = {}
 chat_members = {}  # chat_id -> set of uid — кто играл в этом чате
 active_pvp = {}   # одиночные дуэли
 active_brawl = {} # многопользовательские битвы
-callback_spam = {}  # антиспам: uid -> {cb_data: timestamp}
+callback_spam = {}  # антиспам: uid -> timestamp
 
 RACE_STATS = {
     # Ловкач: средний HP, средний MP, высокая ловкость — сила в физатаках
@@ -258,23 +241,31 @@ def item_desc(it_id):
     return ITEMS_DB.get(it_id, {}).get("desc", "")
 
 
+
+# ─── Хелперы для отправки с HTML-форматированием ─────────────────────────────
+def _send(chat_id, text, **kwargs):
+    kwargs.setdefault("parse_mode", "HTML")
+    return _send(chat_id, text, **kwargs)
+
+def _edit(chat_id, message_id, text, **kwargs):
+    kwargs.setdefault("parse_mode", "HTML")
+    return _edit_raw(text, chat_id=chat_id, message_id=message_id, **kwargs)
+
 def back_to_menu_markup(page=0):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("◀️ Назад в меню", callback_data="mpage_" + str(page)))
     return markup
 
 
-ANTISPAM_DELAY = 0.7  # секунды между одинаковыми нажатиями
+ANTISPAM_DELAY = 0.5  # глобальный кулдаун между любыми нажатиями одного юзера
 
-def check_spam(uid, cb_data):
-    """Возвращает True если это спам (слишком быстрое повторное нажатие)."""
+def check_spam(uid, cb_data=None):
+    """Возвращает True если это спам. Кулдаун per-uid (не per-кнопка)."""
     now = time.time()
-    if uid not in callback_spam:
-        callback_spam[uid] = {}
-    last = callback_spam[uid].get(cb_data, 0)
+    last = callback_spam.get(uid, 0)
     if now - last < ANTISPAM_DELAY:
         return True
-    callback_spam[uid][cb_data] = now
+    callback_spam[uid] = now
     return False
 
 
@@ -291,7 +282,7 @@ def _send_top10(chat_id, edit_msg=None):
     players.sort(key=lambda x: x[1].get("pvp_wins", 0), reverse=True)
     top = players[:10]
     if not top:
-        text = "🥇 ТОП ПУСТ\n━━━━━━━━━━━━━━━━━━━━━━\n\nНикто ещё не победил в PvP!"
+        text = "<b>🥇 ТОП ПУСТ</b>\n──────────────────\n\nНикто ещё не победил в PvP!"
     else:
         medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
         lines = []
@@ -304,14 +295,13 @@ def _send_top10(chat_id, edit_msg=None):
                 medals[i] + " " + get_name(uid) + " — " + get_race_display(p["race"]) + "\n"
                 "    🏅 " + str(pvp_w) + "  💀 " + str(losses) + "  📈 " + wr
             )
-        text = "🏆 ТОП-10 " + scope_label + "\n━━━━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(lines)
+        text = "<b>🏆 ТОП-10 " + scope_label + "</b>\n──────────────────\n\n" + "\n\n".join(lines)
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+        _edit(chat_id, edit_msg.message_id, text,
             reply_markup=back_to_menu_markup(0)
         )
     else:
-        bot.send_message(chat_id, text)
+        _send(chat_id, text)
 
 
 # ─── Страничное меню ──────────────────────────────────────────────────────────
@@ -362,18 +352,16 @@ def menu_header(uid):
     p = user_data[uid]
     if p["race"]:
         return (
-            "╔══ 🎮 ГЛАВНОЕ МЕНЮ ══╗\n"
-            "\n"
-            + get_race_display(p["race"]) + "\n"
-            "\n"
-            "❤️ " + hp_bar(p["hp"], p["max_hp"]) + "  " + str(p["hp"]) + "/" + str(p["max_hp"]) + "\n"
-            "💙 " + mp_bar(p["mp"], p["max_mp"]) + "  " + str(p["mp"]) + "/" + str(p["max_mp"]) + "\n"
-            "\n"
-            "🎒 " + str(len(p["inventory"])) + " пред.   🏆 " + str(p.get("wins", 0)) + " побед\n"
-            "╚════════════════════╝\n"
-            "\nВыбери действие:"
+            "<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n"
+            "──────────────────\n"
+            "<b>" + get_race_display(p["race"]) + "</b>\n\n"
+            "❤️ " + hp_bar(p["hp"], p["max_hp"]) + " <code>" + str(p["hp"]) + "/" + str(p["max_hp"]) + "</code>\n"
+            "💙 " + mp_bar(p["mp"], p["max_mp"]) + " <code>" + str(p["mp"]) + "/" + str(p["max_mp"]) + "</code>\n\n"
+            "🎒 <b>" + str(len(p["inventory"])) + "</b> пред.   🏆 <b>" + str(p.get("wins", 0)) + "</b> побед\n"
+            "──────────────────\n"
+            "Выбери действие:"
         )
-    return "╔══ 🎮 ГЛАВНОЕ МЕНЮ ══╗\n\n⚠️ Герой не создан!\nВыбери класс → 🎭 Сменить класс\n\n╚════════════════════╝\n\nВыбери действие:"
+    return "<b>🎮 ГЛАВНОЕ МЕНЮ</b>\n──────────────────\n\n⚠️ <b>Герой не создан!</b>\nВыбери класс → 🎭 <i>Сменить класс</i>\n\nВыбери действие:"
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("mpage_"))
@@ -385,10 +373,7 @@ def handle_menu_page(call):
         bot.answer_callback_query(call.id)
         return
     page = int(arg)
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=menu_header(uid),
+    _edit(call.message.chat.id, call.message.message_id, menu_header(uid),
         reply_markup=menu_inline_page(page)
     )
     bot.answer_callback_query(call.id)
@@ -401,10 +386,10 @@ def send_welcome(message):
     uid = message.from_user.id
     init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     txt = (
-        "⚔️ ДОБРО ПОЖАЛОВАТЬ В АРЕНУ ⚔️\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>⚔️ ДОБРО ПОЖАЛОВАТЬ В АРЕНУ ⚔️</b>\n"
+        "──────────────────────────\n\n"
         "Выбери класс и вступай в бой!\n\n"
-        "📜 КОМАНДЫ\n"
+        "<b>📜 КОМАНДЫ</b>\n"
         "┌ /race     — выбрать / сменить класс\n"
         "├ /fight    — битва с монстром (PvE)\n"
         "├ /pvp      — дуэль (ответом на сообщение)\n"
@@ -417,20 +402,20 @@ def send_welcome(message):
         "├ /stats    — статистика\n"
         "├ /items    — все предметы\n"
         "└ /top      — топ-10 группы\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "──────────────────────────\n"
         "Используй /race чтобы начать!"
     )
-    bot.send_message(message.chat.id, txt, reply_markup=ReplyKeyboardRemove())
+    _send(message.chat.id, txt, reply_markup=ReplyKeyboardRemove())
 
 
 # ─── /items ───────────────────────────────────────────────────────────────────
 
 @bot.message_handler(commands=["items"])
 def show_items_list(message):
-    txt = "📦 ВСЕ ПРЕДМЕТЫ\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    txt = "<b>📦 ВСЕ ПРЕДМЕТЫ</b>\n──────────────────\n\n"
     for it_id, info in ITEMS_DB.items():
         txt += info["name"] + "\n  └ " + info["desc"] + "\n\n"
-    bot.send_message(message.chat.id, txt)
+    _send(message.chat.id, txt)
 
 
 # ─── Обработка кнопок меню ────────────────────────────────────────────────────
@@ -442,7 +427,7 @@ def handle_menu_action(call):
     init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
     # Антиспам для кнопок меню
-    if check_spam(uid, call.data):
+    if check_spam(uid):
         bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!", show_alert=False)
         return
 
@@ -462,12 +447,8 @@ def handle_menu_action(call):
             InlineKeyboardButton("Физ. удар ⚔️",     callback_data="pvep"),
             InlineKeyboardButton("Магия (-15 MP) 🔮", callback_data="pvem")
         )
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="👹 МОНСТР ПОЯВИЛСЯ!\n━━━━━━━━━━━━━━━━━━━━━━\n\nВыбери тип атаки:",
-            reply_markup=markup
-        )
+        _edit(call.message.chat.id, call.message.message_id, "<b>👹 МОНСТР ПОЯВИЛСЯ!</b>\n──────────────────\n\nВыбери тип атаки:",
+            reply_markup=markup)
 
     elif action == "roll":
         _do_roll(call.message.chat.id, uid, edit_msg=call.message)
@@ -487,13 +468,10 @@ def handle_menu_action(call):
         _send_stats(call.message.chat.id, uid, edit_msg=call.message)
 
     elif action == "items":
-        txt = "📦 ВСЕ ПРЕДМЕТЫ\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        txt = "<b>📦 ВСЕ ПРЕДМЕТЫ</b>\n──────────────────\n\n"
         for it_id, info in ITEMS_DB.items():
             txt += info["name"] + "\n  └ " + info["desc"] + "\n\n"
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text=txt,
+        _edit(call.message.chat.id, call.message.message_id, txt,
             reply_markup=InlineKeyboardMarkup().add(
                 InlineKeyboardButton("◀️ Назад в меню", callback_data="mpage_0")
             )
@@ -521,10 +499,7 @@ def _do_action_inline(call):
     save_data()
     act = random.choice(FUNNY_ACTIONS)
     name = call.from_user.first_name
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text="🎪 СЛУЧАЙНОЕ ДЕЙСТВИЕ\n━━━━━━━━━━━━━━━━━━━━━━\n\n" + name + " " + act,
+    _edit(call.message.chat.id, call.message.message_id, "<b>🎪 СЛУЧАЙНОЕ ДЕЙСТВИЕ</b>\n──────────────────\n\n", + name + " " + act,
         reply_markup=back_to_menu_markup(0)
     )
 
@@ -550,25 +525,24 @@ def _send_stats(chat_id, uid, edit_msg=None):
     ratio = str(round(pvp_wins / total_pvp * 100)) + "%" if total_pvp > 0 else "N/A"
     total = wins + losses
     text = (
-        "📊 СТАТИСТИКА\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👤 " + get_name(uid) + "\n\n"
-        "🏅 PvP победы:    " + str(pvp_wins) + "\n"
-        "👹 PvE победы:    " + str(pve_wins) + "\n"
-        "💀 Поражения:     " + str(losses) + "\n"
-        "⚔️  Всего боёв:    " + str(total) + "\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📈 Винрейт (PvP): " + ratio
+        "<b>📊 СТАТИСТИКА</b>\n"
+        "──────────────────\n"
+        "👤 <b>" + get_name(uid) + "</b>\n\n"
+        "🏅 PvP победы:   <b>" + str(pvp_wins) + "</b>\n"
+        "👹 PvE победы:   <b>" + str(pve_wins) + "</b>\n"
+        "💀 Поражения:    <b>" + str(losses) + "</b>\n"
+        "⚔️  Всего боёв:   <b>" + str(total) + "</b>\n"
+        "──────────────────\n"
+        "📈 Винрейт (PvP): <b>" + ratio + "</b>"
     )
 
     # ── Отправляем текст ──────────────────────────────────────────────────────
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+        _edit(chat_id, edit_msg.message_id, text,
             reply_markup=back_to_menu_markup(0)
         )
     else:
-        bot.send_message(chat_id, text)
+        _send(chat_id, text)
 
     # ── График побед над игроками (всегда отдельным сообщением) ───────────────
     if not HAS_MPL:
@@ -633,18 +607,18 @@ def _show_race_selection(chat_id, uid, edit_msg=None):
         markup.add(InlineKeyboardButton(label, callback_data="r" + str(i)))
     markup.add(InlineKeyboardButton("◀️ Назад в меню", callback_data="mpage_0"))
     text = (
-        "🎭 ВЫБОР КЛАССА\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🎭 ВЫБОР КЛАССА</b>\n──────────────────\n\n"
         + (
             "Текущий: " + get_race_display(p["race"]) + "\n"
-            "⚠️ При смене HP/MP сбросятся, инвентарь сохранится.\n\n"
+            "<i>⚠️ При смене HP/MP сбросятся, инвентарь сохранится.</i>\n\n"
             if p["race"] else ""
         )
         + "Выбери класс:"
     )
     if edit_msg:
-        bot.edit_message_text(chat_id=chat_id, message_id=edit_msg.message_id, text=text, reply_markup=markup)
+        _edit(chat_id, edit_msg.message_id, text, reply_markup=markup)
     else:
-        bot.send_message(chat_id, text, reply_markup=markup)
+        _send(chat_id, text, reply_markup=markup)
 
 
 @bot.message_handler(commands=["race"])
@@ -675,29 +649,28 @@ def handle_race_selection(call):
     display = get_race_display(race)
     if old_race is None:
         log = (
-            "✅ ГЕРОЙ СОЗДАН!\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            + display + "\n\n"
-            "❤️ HP:       " + str(st["hp"]) + "\n"
-            "💙 MP:       " + str(st["mp"]) + "\n"
-            "⚡ Ловкость: " + str(st["dex"]) + "\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Нажми ⚔️ Битва с монстром чтобы начать!"
+            "<b>✅ ГЕРОЙ СОЗДАН!</b>\n"
+            "──────────────────\n\n"
+            "<b>" + display + "</b>\n\n"
+            "❤️ HP:       <b>" + str(st["hp"]) + "</b>\n"
+            "💙 MP:       <b>" + str(st["mp"]) + "</b>\n"
+            "⚡ Ловкость: <b>" + str(st["dex"]) + "</b>\n\n"
+            "──────────────────\n"
+            "Нажми ⚔️ <i>Битва с монстром</i> чтобы начать!"
         )
     else:
         log = (
-            "🔄 КЛАСС ИЗМЕНЁН\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>🔄 КЛАСС ИЗМЕНЁН</b>\n"
+            "──────────────────\n\n"
             "Было:  " + get_race_display(old_race) + "\n"
-            "Стало: " + display + "\n\n"
-            "❤️ HP:       " + str(st["hp"]) + "\n"
-            "💙 MP:       " + str(st["mp"]) + "\n"
-            "⚡ Ловкость: " + str(st["dex"]) + "\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Инвентарь и бонусы сохранены."
+            "Стало: <b>" + display + "</b>\n\n"
+            "❤️ HP:       <b>" + str(st["hp"]) + "</b>\n"
+            "💙 MP:       <b>" + str(st["mp"]) + "</b>\n"
+            "⚡ Ловкость: <b>" + str(st["dex"]) + "</b>\n\n"
+            "──────────────────\n"
+            "<i>Инвентарь и бонусы сохранены.</i>"
         )
-    bot.edit_message_text(
-        chat_id=call.message.chat.id, message_id=call.message.message_id, text=log,
+    _edit(call.message.chat.id, call.message.message_id, log,
         reply_markup=back_to_menu_markup(0)
     )
 
@@ -709,12 +682,11 @@ def _send_hero_info(chat_id, uid, edit_msg=None):
     if p["race"] is None:
         text = "У тебя ещё нет героя. Выбери класс через меню или /race"
         if edit_msg:
-            bot.edit_message_text(
-                chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+            _edit(chat_id, edit_msg.message_id, text,
                 reply_markup=back_to_menu_markup(0)
             )
         else:
-            bot.send_message(chat_id, text)
+            _send(chat_id, text)
         return
     rb = get_active_roll_buff(uid)
     b_txt = ""
@@ -724,28 +696,24 @@ def _send_hero_info(chat_id, uid, edit_msg=None):
         b_txt = "  💀 дебафф " + str(rb)
     lucky = "\n🍀 Амулет удачи активен!" if p.get("lucky_amulet") else ""
     msg = (
-        "╔══ 👤 КАРТОЧКА ГЕРОЯ ══╗\n"
-        "\n"
-        + get_race_display(p["race"]) + "\n"
-        "\n"
-        "❤️ " + hp_bar(p["hp"], p["max_hp"]) + "  " + str(p["hp"]) + "/" + str(p["max_hp"]) + "\n"
-        "💙 " + mp_bar(p["mp"], p["max_mp"]) + "  " + str(p["mp"]) + "/" + str(p["max_mp"]) + "\n"
-        "\n"
-        "⚡ Ловкость:    " + str(p["dexterity"]) + "\n"
-        "⚔️  Боев. бонус: +" + str(p["combat_bonus"]) + b_txt + "\n"
-        "🎒 Предметов:   " + str(len(p["inventory"])) + lucky + "\n"
-        "\n"
-        "🏆 Победы:     " + str(p.get("wins", 0)) + "\n"
-        "💀 Поражения:  " + str(p.get("losses", 0)) + "\n"
-        "╚═══════════════════════╝"
+        "<b>👤 КАРТОЧКА ГЕРОЯ</b>\n"
+        "──────────────────\n"
+        "<b>" + get_race_display(p["race"]) + "</b>\n\n"
+        "❤️ " + hp_bar(p["hp"], p["max_hp"]) + " <code>" + str(p["hp"]) + "/" + str(p["max_hp"]) + "</code>\n"
+        "💙 " + mp_bar(p["mp"], p["max_mp"]) + " <code>" + str(p["mp"]) + "/" + str(p["max_mp"]) + "</code>\n\n"
+        "⚡ Ловкость:    <b>" + str(p["dexterity"]) + "</b>\n"
+        "⚔️  Боев. бонус: <b>+" + str(p["combat_bonus"]) + "</b>" + b_txt + "\n"
+        "🎒 Предметов:   <b>" + str(len(p["inventory"])) + "</b>" + lucky + "\n\n"
+        "──────────────────\n"
+        "🏆 Победы:    <b>" + str(p.get("wins", 0)) + "</b>\n"
+        "💀 Поражения: <b>" + str(p.get("losses", 0)) + "</b>"
     )
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id, text=msg,
+        _edit(chat_id, edit_msg.message_id, msg,
             reply_markup=back_to_menu_markup(0)
         )
     else:
-        bot.send_message(chat_id, msg)
+        _send(chat_id, msg)
 
 
 def _send_bag(chat_id, uid, edit_msg=None):
@@ -753,12 +721,11 @@ def _send_bag(chat_id, uid, edit_msg=None):
     if not inv:
         text = "🎒 Инвентарь пуст. Открой сундук через меню или /loot"
         if edit_msg:
-            bot.edit_message_text(
-                chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+            _edit(chat_id, edit_msg.message_id, text,
                 reply_markup=back_to_menu_markup(0)
             )
         else:
-            bot.send_message(chat_id, text)
+            _send(chat_id, text)
         return
     counts = {}
     for it in inv:
@@ -769,19 +736,16 @@ def _send_bag(chat_id, uid, edit_msg=None):
         markup.add(InlineKeyboardButton(label, callback_data="use" + it_id))
     markup.add(InlineKeyboardButton("◀️ Назад в меню", callback_data="mpage_0"))
     bag_text = (
-        "🎒 ИНВЕНТАРЬ\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👤 " + get_name(uid) + "\n"
-        "📦 " + str(len(inv)) + " предм.  •  Нажми — использовать"
+        "<b>🎒 ИНВЕНТАРЬ</b>\n"
+        "──────────────────\n"
+        "👤 <b>" + get_name(uid) + "</b>\n"
+        "📦 " + str(len(inv)) + " предм.  •  <i>Нажми — использовать</i>"
     )
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id,
-            text=bag_text,
-            reply_markup=markup
-        )
+        _edit(chat_id, edit_msg.message_id, bag_text,
+            reply_markup=markup)
     else:
-        bot.send_message(chat_id, bag_text, reply_markup=markup)
+        _send(chat_id, bag_text, reply_markup=markup)
 
 
 def _do_roll(chat_id, uid, edit_msg=None):
@@ -807,19 +771,18 @@ def _do_roll(chat_id, uid, edit_msg=None):
     sign = "+" if b >= 0 else ""
     log = (
         amulet_txt +
-        "🎲 БРОСОК КУБИКА d20\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Результат: " + str(res) + " / 20\n\n"
+        "<b>🎲 БРОСОК КУБИКА d20</b>\n"
+        "──────────────────\n\n"
+        "Результат: <b>" + str(res) + " / 20</b>\n\n"
         + st + "\n\n"
-        "Модификатор " + sign + str(b) + " действует 5 минут."
+        "<i>Модификатор " + sign + str(b) + " действует 5 минут.</i>"
     )
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id, text=log,
+        _edit(chat_id, edit_msg.message_id, log,
             reply_markup=back_to_menu_markup(0)
         )
     else:
-        bot.send_message(chat_id, log)
+        _send(chat_id, log)
 
 
 def _do_loot(chat_id, uid, edit_msg=None, call=None):
@@ -831,32 +794,30 @@ def _do_loot(chat_id, uid, edit_msg=None, call=None):
         if call:
             bot.answer_callback_query(call.id, cd_text, show_alert=True)
         elif edit_msg:
-            bot.edit_message_text(
-                chat_id=chat_id, message_id=edit_msg.message_id, text=cd_text,
+            _edit(chat_id, edit_msg.message_id, cd_text,
                 reply_markup=back_to_menu_markup(0)
             )
         else:
-            bot.send_message(chat_id, cd_text)
+            _send(chat_id, cd_text)
         return
     l_id = random.choice(ITEM_KEYS)
     user_data[uid]["inventory"].append(l_id)
     user_data[uid]["last_loot_time"] = cur
     save_data()
     text = (
-        "📦 СУНДУК ОТКРЫТ!\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👤 " + get_name(uid) + " нашёл:\n\n"
-        "✨ " + item_name(l_id) + "\n"
-        "   └ " + item_desc(l_id) + "\n\n"
+        "<b>📦 СУНДУК ОТКРЫТ!</b>\n"
+        "──────────────────\n\n"
+        "👤 <b>" + get_name(uid) + "</b> нашёл:\n\n"
+        "✨ <b>" + item_name(l_id) + "</b>\n"
+        "   <i>" + item_desc(l_id) + "</i>\n\n"
         "Предмет в инвентаре 🎒"
     )
     if edit_msg:
-        bot.edit_message_text(
-            chat_id=chat_id, message_id=edit_msg.message_id, text=text,
+        _edit(chat_id, edit_msg.message_id, text,
             reply_markup=back_to_menu_markup(0)
         )
     else:
-        bot.send_message(chat_id, text)
+        _send(chat_id, text)
 
 
 # ─── /my_hero, /bag, /stats ───────────────────────────────────────────────────
@@ -899,7 +860,7 @@ def handle_item_use(call):
     p["inventory"].remove(it_id)
     name = item_name(it_id)
     f_name = get_name(uid)
-    log = "🎒 ИСПОЛЬЗОВАНИЕ ПРЕДМЕТА\n━━━━━━━━━━━━━━━━━━━━━━\n👤 " + f_name + "\n✨ " + name + "\n\n"
+    log = "<b>🎒 ИСПОЛЬЗОВАНИЕ ПРЕДМЕТА</b>\n──────────────────\n👤 <b>" + f_name + "</b>\n✨ <b>" + name + "</b>\n\n"
 
     if it_id == "juice":
         p["hp"] = p["max_hp"]
@@ -961,7 +922,7 @@ def handle_item_use(call):
         log += "Предмет использован... и ничего не произошло."
 
     log += (
-        "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        "\n\n──────────────────\n"
         "❤️ " + hp_bar(p["hp"], p["max_hp"]) + "  " + str(p["hp"]) + "/" + str(p["max_hp"]) + "\n"
         "💙 " + mp_bar(p["mp"], p["max_mp"]) + "  " + str(p["mp"]) + "/" + str(p["max_mp"])
     )
@@ -969,10 +930,8 @@ def handle_item_use(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🎒 Назад в инвентарь", callback_data="menu_bag"))
     markup.add(InlineKeyboardButton("◀️ В меню", callback_data="mpage_0"))
-    bot.edit_message_text(
-        chat_id=call.message.chat.id, message_id=call.message.message_id, text=log,
-        reply_markup=markup
-    )
+    _edit(call.message.chat.id, call.message.message_id, log,
+        reply_markup=markup)
 
 
 # ─── /fight ───────────────────────────────────────────────────────────────────
@@ -982,14 +941,14 @@ def start_fight(message):
     uid = message.from_user.id
     init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     if user_data[uid]["race"] is None:
-        bot.send_message(message.chat.id, "Сначала создай персонажа через /race")
+        _send(message.chat.id, "Сначала создай персонажа через /race")
         return
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("Физ. удар ⚔️",     callback_data="pvep"),
         InlineKeyboardButton("Магия (-15 MP) 🔮", callback_data="pvem")
     )
-    bot.send_message(message.chat.id, "👹 МОНСТР ПОЯВИЛСЯ!\n━━━━━━━━━━━━━━━━━━━━━━\n\nВыбери тип атаки:", reply_markup=markup)
+    _send(message.chat.id, "👹 МОНСТР ПОЯВИЛСЯ!\n──────────────────\n\nВыбери тип атаки:", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data in ["pvep", "pvem"])
@@ -997,7 +956,7 @@ def handle_pve(call):
     uid = call.from_user.id
     init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
-    if check_spam(uid, call.data):
+    if check_spam(uid):
         bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
         return
 
@@ -1018,14 +977,14 @@ def handle_pve(call):
     total_bonus = p["combat_bonus"] + get_active_roll_buff(uid)
 
     log = (
-        "⚔️ БОЙ С МОНСТРОМ\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚔️  " + pname + " [" + get_race_display(p["race"]) + "]\n"
-        "👹  " + m_name + " — " + m_info["desc"] + "\n"
+        "<b>⚔️ БОЙ С МОНСТРОМ</b>\n"
+        "──────────────────\n"
+        "⚔️  <b>" + pname + "</b> [" + get_race_display(p["race"]) + "]\n"
+        "👹  <b>" + m_name + "</b> — <i>" + m_info["desc"] + "</i>\n"
     )
     if event:
-        log += "🎲 " + event + "\n"
-    log += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        log += "🎲 <i>" + event + "</i>\n"
+    log += "──────────────────\n\n"
 
     MAX_ROUNDS = random.randint(1, 3)
     winner = None
@@ -1073,7 +1032,7 @@ def handle_pve(call):
     # Применяем итоговый HP
     p["hp"] = player_hp
 
-    log += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    log += "\n──────────────────\n"
     if winner == "player" or (winner is None and monster_hp < monster_max_hp // 2):
         # Победил игрок (или нанёс больше урона за 6 раундов)
         if winner is None:
@@ -1095,10 +1054,7 @@ def handle_pve(call):
     )
 
     save_data()
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=log,
+    _edit(call.message.chat.id, call.message.message_id, log,
         reply_markup=back_to_menu_markup(0)
     )
     bot.answer_callback_query(call.id)
@@ -1130,16 +1086,15 @@ def start_pvp(message):
     )
     markup.add(
         InlineKeyboardButton("❌ Отклонить вызов", callback_data="dueld" + b_id),
-        InlineKeyboardButton("🏳️ Отозвать вызов",  callback_data="duels" + b_id),
-    )
+        InlineKeyboardButton("🏳️ Отозвать вызов",  callback_data="duels" + b_id))
     def_name = message.reply_to_message.from_user.first_name
     atk_name = message.from_user.first_name
-    bot.send_message(
+    _send(
         message.chat.id,
         (
-            "⚔️ ВЫЗОВ НА ДУЭЛЬ\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚡ " + atk_name + " вызывает " + def_name + "!\n\n"
+            "<b>⚔️ ВЫЗОВ НА ДУЭЛЬ</b>\n"
+            "──────────────────\n\n"
+            "⚡ <b>" + atk_name + "</b> вызывает <b>" + def_name + "</b>!\n\n"
             + def_name + ": выбери тип защиты.\n"
             + atk_name + ": можешь отозвать вызов."
         ),
@@ -1153,7 +1108,7 @@ def handle_pvp_battle(call):
     b_id = call.data[5:]
     uid = call.from_user.id
 
-    if check_spam(uid, call.data):
+    if check_spam(uid):
         bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!")
         return
     if b_id not in active_pvp:
@@ -1172,10 +1127,7 @@ def handle_pvp_battle(call):
         del active_pvp[b_id]
         n_atk = get_name(atk_id)
         n_def = get_name(def_id)
-        bot.edit_message_text(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            text="❌ ДУЭЛЬ ОТКЛОНЕНА\n━━━━━━━━━━━━━━━━━━━━━━\n\n" + n_def + " отклонил вызов " + n_atk + ".",
+        _edit(call.message.chat.id, call.message.message_id, "<b>❌ ДУЭЛЬ ОТКЛОНЕНА</b>\n──────────────────\n\n", + n_def + " отклонил вызов " + n_atk + ".",
             reply_markup=back_to_menu_markup(0)
         )
         bot.answer_callback_query(call.id, "Вызов отклонён.")
@@ -1190,10 +1142,7 @@ def handle_pvp_battle(call):
                 bot.answer_callback_query(call.id, "Только атакующий может отозвать вызов!", show_alert=True)
                 return
             del active_pvp[b_id]
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="🏳️ ВЫЗОВ ОТОЗВАН\n━━━━━━━━━━━━━━━━━━━━━━\n\n" + get_name(atk_id) + " отозвал вызов.",
+            _edit(call.message.chat.id, call.message.message_id, "<b>🏳️ ВЫЗОВ ОТОЗВАН</b>\n──────────────────\n\n", + get_name(atk_id) + " отозвал вызов.",
                 reply_markup=back_to_menu_markup(0)
             )
             bot.answer_callback_query(call.id, "Вызов отозван.")
@@ -1214,18 +1163,14 @@ def handle_pvp_battle(call):
             p_winner.setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
             del active_pvp[b_id]
             save_data()
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=(
-                    "🏳️ СДАЧА\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            _edit(call.message.chat.id, call.message.message_id,
+                    "<b>🏳️ СДАЧА</b>\n"
+                    "──────────────────\n\n"
                     + get_name(loser_id) + " сдался!\n\n"
                     "🏆 Победитель: " + get_name(winner_id) + "\n\n"
                     "💀 " + get_name(loser_id) + " —" + str(dmg) + " HP за трусость\n"
-                    "❤️ " + hp_bar(p_loser["hp"], p_loser["max_hp"]) + "  " + str(p_loser["hp"]) + "/" + str(p_loser["max_hp"])
-                ),
-                reply_markup=back_to_menu_markup(0)
+                    "❤️ " + hp_bar(p_loser["hp"], p_loser["max_hp"]) + "  " + str(p_loser["hp"]) + "/" + str(p_loser["max_hp"]),
+                    reply_markup=back_to_menu_markup(0)
             )
             bot.answer_callback_query(call.id, "Ты сдался.")
         return
@@ -1289,14 +1234,14 @@ def handle_pvp_battle(call):
 
     # ── Итог дуэли ────────────────────────────────────────────────────────────
     log = (
-        "⚔️ ДУЭЛЬ\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ " + n1 + " [" + get_race_display(p1["race"]) + "]\n"
-        "⚡ " + n2 + " [" + get_race_display(p2["race"]) + "]\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>⚔️ ДУЭЛЬ</b>\n"
+        "──────────────────\n"
+        "⚡ <b>" + n1 + "</b> [" + get_race_display(p1["race"]) + "]\n"
+        "⚡ <b>" + n2 + "</b> [" + get_race_display(p2["race"]) + "]\n"
+        "──────────────────\n\n"
         + "\n".join(rounds_log) + "\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "СЧЁТ: " + str(wins1) + " : " + str(wins2) + "\n\n"
+        "──────────────────\n"
+        "Счёт: <b>" + str(wins1) + " : " + str(wins2) + "</b>\n\n"
     )
 
     if wins1 > wins2:
@@ -1320,10 +1265,7 @@ def handle_pvp_battle(call):
 
     del active_pvp[b_id]
     save_data()
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=log,
+    _edit(call.message.chat.id, call.message.message_id, log,
         reply_markup=back_to_menu_markup(0)
     )
     bot.answer_callback_query(call.id)
@@ -1358,14 +1300,14 @@ def _start_brawl_menu(call):
     }
     markup = _brawl_lobby_markup(brawl_id)
     name = call.from_user.first_name
-    sent = bot.send_message(
+    sent = _send(
         call.message.chat.id,
         (
-            "⚔️ ГРУППОВАЯ БИТВА\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "👑 Организатор: " + name + "\n"
-            "👥 Игроков: 1/10\n\n"
-            "Жди, пока другие присоединятся!"
+            "<b>⚔️ ГРУППОВАЯ БИТВА</b>\n"
+            "──────────────────\n\n"
+            "👑 Организатор: <b>" + name + "</b>\n"
+            "👥 Игроков: <b>1/10</b>\n\n"
+            "<i>Жди, пока другие присоединятся!</i>"
         ),
         reply_markup=markup
     )
@@ -1377,11 +1319,9 @@ def _brawl_lobby_markup(brawl_id):
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("➕ Присоединиться", callback_data="brawl_join_" + brawl_id),
-        InlineKeyboardButton("⚔️ Начать бой!",    callback_data="brawl_start_" + brawl_id),
-    )
+        InlineKeyboardButton("⚔️ Начать бой!",    callback_data="brawl_start_" + brawl_id))
     markup.add(
-        InlineKeyboardButton("❌ Отменить битву", callback_data="brawl_cancel_" + brawl_id),
-    )
+        InlineKeyboardButton("❌ Отменить битву", callback_data="brawl_cancel_" + brawl_id))
     return markup
 
 
@@ -1391,11 +1331,11 @@ def start_brawl_cmd(message):
     init_user(uid, message.from_user.first_name, chat_id=message.chat.id)
     p = user_data[uid]
     if p["race"] is None:
-        bot.send_message(message.chat.id, "Сначала выбери расу через /race")
+        _send(message.chat.id, "Сначала выбери расу через /race")
         return
     brawl_id = "B" + str(uid)
     if brawl_id in active_brawl:
-        bot.send_message(message.chat.id, "⚠️ У тебя уже есть активная групповая битва! Сначала отмени её.")
+        _send(message.chat.id, "⚠️ У тебя уже есть активная групповая битва! Сначала отмени её.")
         return
     active_brawl[brawl_id] = {
         "owner": uid,
@@ -1407,11 +1347,11 @@ def start_brawl_cmd(message):
     }
     markup = _brawl_lobby_markup(brawl_id)
     name = message.from_user.first_name
-    sent = bot.send_message(
+    sent = _send(
         message.chat.id,
         (
             "⚔️ ГРУППОВАЯ БИТВА\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "──────────────────\n\n"
             "👑 Организатор: " + name + "\n"
             "👥 Игроков: 1/10\n\n"
             "Жди, пока другие присоединятся!"
@@ -1447,10 +1387,7 @@ def handle_brawl(call):
             bot.answer_callback_query(call.id, "Битву нельзя отменить — она уже идёт!", show_alert=True)
             return
         del active_brawl[brawl_id]
-        bot.edit_message_text(
-            chat_id=brawl["chat_id"],
-            message_id=brawl["msg_id"],
-            text="❌ Групповая битва отменена организатором.",
+        _edit(brawl["chat_id"], brawl["msg_id"], "❌ Групповая битва отменена организатором.",
             reply_markup=back_to_menu_markup(0)
         )
         bot.answer_callback_query(call.id, "Битва отменена.")
@@ -1477,17 +1414,14 @@ def handle_brawl(call):
             p = user_data[pid]
             lines.append(get_name(pid) + " — " + get_race_display(p["race"]))
         text = (
-            "⚔️ ГРУППОВАЯ БИТВА\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "👥 Игроков: " + str(len(brawl["players"])) + "/10\n\n"
+            "<b>⚔️ ГРУППОВАЯ БИТВА</b>\n"
+            "──────────────────\n\n"
+            "👥 Игроков: <b>" + str(len(brawl["players"])) + "/10</b>\n\n"
             + "\n".join(lines) +
-            "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Жди, пока организатор начнёт бой!"
+            "\n\n──────────────────\n"
+            "<i>Жди, пока организатор начнёт бой!</i>"
         )
-        bot.edit_message_text(
-            chat_id=brawl["chat_id"],
-            message_id=brawl["msg_id"],
-            text=text,
+        _edit(brawl["chat_id"], brawl["msg_id"], text,
             reply_markup=_brawl_lobby_markup(brawl_id)
         )
         bot.answer_callback_query(call.id, "Ты в битве!")
@@ -1504,22 +1438,17 @@ def handle_brawl(call):
         markup = InlineKeyboardMarkup()
         markup.add(
             InlineKeyboardButton("Физ. удар ⚔️",     callback_data="brawl_phys_" + brawl_id),
-            InlineKeyboardButton("Магия (-15 MP) 🔮", callback_data="brawl_magic_" + brawl_id),
-        )
+            InlineKeyboardButton("Магия (-15 MP) 🔮", callback_data="brawl_magic_" + brawl_id))
         names = [get_name(pid) + " — " + get_race_display(user_data[pid]["race"]) for pid in brawl["players"]]
         text = (
-            "⚔️ БИТВА НАЧИНАЕТСЯ!\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Участники:\n" + "\n".join(names) +
-            "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚔️ БИТВА НАЧИНАЕТСЯ!</b>\n"
+            "──────────────────\n\n"
+            "<b>Участники:</b>\n" + "\n".join(names) +
+            "\n\n──────────────────\n"
             "Каждый выбирает свою атаку:"
         )
-        bot.edit_message_text(
-            chat_id=brawl["chat_id"],
-            message_id=brawl["msg_id"],
-            text=text,
-            reply_markup=markup
-        )
+        _edit(brawl["chat_id"], brawl["msg_id"], text,
+            reply_markup=markup)
         bot.answer_callback_query(call.id)
 
     # ── выбор атаки ───────────────────────────────────────────────────────────
@@ -1596,22 +1525,19 @@ def _resolve_brawl(brawl_id):
         )
 
     log = (
-        "⚔️ ИТОГИ ГРУППОВОЙ БИТВЫ\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>⚔️ ИТОГИ ГРУППОВОЙ БИТВЫ</b>\n"
+        "──────────────────\n\n"
         + "\n".join(details)
-        + "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n\n──────────────────\n"
         + "\n".join(loser_lines)
-        + "\n\n🏆 Победитель: " + get_name(winner_id)
+        + "\n\n🏆 Победитель: <b>" + get_name(winner_id) + "</b>"
         + " [" + get_race_display(user_data[winner_id]["race"]) + "]"
         + drop_log
     )
 
     save_data()
     del active_brawl[brawl_id]
-    bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=msg_id,
-        text=log,
+    _edit(chat_id, msg_id, log,
         reply_markup=back_to_menu_markup(0)
     )
 
@@ -1633,12 +1559,12 @@ def do_action(message):
     last = user_data[uid]["last_action_time"]
     if cur - last < 180:
         rem = int(180 - (cur - last))
-        bot.send_message(message.chat.id, "⏱️ Жди " + str(rem) + " сек")
+        _send(message.chat.id, "⏱️ Жди " + str(rem) + " сек")
     else:
         user_data[uid]["last_action_time"] = cur
         save_data()
         act = random.choice(FUNNY_ACTIONS)
-        bot.send_message(message.chat.id, "🎪 " + get_name(uid) + " " + act)
+        _send(message.chat.id, "🎪 " + get_name(uid) + " " + act)
 
 
 @bot.message_handler(commands=["roll"])
@@ -1657,6 +1583,24 @@ def handle_unknown_messages(message):
 
 if __name__ == "__main__":
     load_data()
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("/race",    "выбрать / сменить класс"),
+            telebot.types.BotCommand("/fight",   "битва с монстром (PvE)"),
+            telebot.types.BotCommand("/pvp",     "дуэль 1 на 1 (ответом)"),
+            telebot.types.BotCommand("/brawl",   "групповая битва"),
+            telebot.types.BotCommand("/loot",    "сундук (кд 2 часа)"),
+            telebot.types.BotCommand("/action",  "случайное действие (кд 3 мин)"),
+            telebot.types.BotCommand("/roll",    "кубик d20"),
+            telebot.types.BotCommand("/my_hero", "карточка героя"),
+            telebot.types.BotCommand("/bag",     "инвентарь"),
+            telebot.types.BotCommand("/stats",   "статистика"),
+            telebot.types.BotCommand("/items",   "все предметы"),
+            telebot.types.BotCommand("/top",     "топ-10 группы"),
+            telebot.types.BotCommand("/help",    "помощь"),
+        ])
+    except Exception as e:
+        print("set_my_commands error (ignored):", e)
     Thread(target=regen_loop, daemon=True).start()
     print("Бот успешно запущен...")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=30, long_polling_timeout=30, restart_on_change=False)
