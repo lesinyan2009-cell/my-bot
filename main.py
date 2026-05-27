@@ -50,15 +50,10 @@ active_brawl = {} # многопользовательские битвы
 callback_spam = {}  # антиспам: uid -> timestamp
 
 RACE_STATS = {
-    # Ловкач: средний HP, средний MP, высокая ловкость — сила в физатаках
     "Томатная эльфийка": {"hp": 100, "mp": 60,  "dex": 14, "emoji": "🍅"},
-    # Боец: высокий HP, низкий MP, средняя ловкость — баланс физ/маг
     "Брокен боб":         {"hp": 120, "mp": 40,  "dex": 11, "emoji": "🫘"},
-    # Танк: очень высокий HP, минимум MP и ловкости — только физ, но живучий
     "Какашливый гусеница":{"hp": 140, "mp": 20,  "dex": 8,  "emoji": "🐛"},
-    # Маг: низкий HP, очень высокий MP, средняя ловкость — сила в магии
     "Данилость":          {"hp": 95,  "mp": 110, "dex": 10, "emoji": "✨"},
-    # Командир: выше среднего HP и MP, низкая ловкость — универсал
     "Ютуки величайший":   {"hp": 115, "mp": 70,  "dex": 7,  "emoji": "👑"},
 }
 
@@ -73,13 +68,10 @@ RACE_COMBAT = {
 }
 
 MONSTERS_DB = {
-    # Лёгкие (бонус 6–8) — хороши для старта
     "Томатость 🍅":  {"type": "всё",  "bonus": 6,  "desc": "выглядит нелепо, но кусается"},
     "Пузырь 🫧":    {"type": "лёд",  "bonus": 8,  "desc": "надувается и взрывается"},
-    # Средние (бонус 10–11) — основной контент
     "Мекзость 🧠":  {"type": "ум",   "bonus": 10, "desc": "хитрит мыслями"},
     "Грязнюха 🪣":  {"type": "яд",   "bonus": 11, "desc": "брызгается мусором"},
-    # Сложные (бонус 13–15) — вызов для прокачанных
     "Чорность 🔮":  {"type": "маг",  "bonus": 13, "desc": "бьет темной магией"},
     "Размезность 💪":{"type": "сила","bonus": 15, "desc": "бьет кулачищами"},
 }
@@ -100,7 +92,6 @@ ITEMS_DB = {
 
 ITEM_KEYS = list(ITEMS_DB.keys())
 
-# ─── Случайные действия ───────────────────────────────────────────────────────
 FUNNY_ACTIONS = [
     "случайно ломает стол в таверне 🪑",
     "спотыкается о жирную гусеницу 🐛",
@@ -116,18 +107,16 @@ FUNNY_ACTIONS = [
     "созывает совет мудрецов, но приходит только один боб 🫘",
 ]
 
-# Случайные события при битве (флейвор)
 BATTLE_EVENTS = [
     "Внезапный ветер сбивает с толку обоих! 🌪️",
     "Мимо проходит курица и игнорирует всех 🐔",
     "Земля слегка трясётся — наверное кто-то упал 💥",
-    "",  # пусто = обычная битва
+    "",
     "",
     "",
 ]
 
-DROP_CHANCE = 0.10  # 10% шанс дропа
-
+DROP_CHANCE = 0.10
 
 # ─── сохранение / загрузка ────────────────────────────────────────────────────
 
@@ -186,15 +175,13 @@ def init_user(uid, name=None, chat_id=None):
     elif name:
         user_data[uid]["name"] = name
         save_data()
-    # Регистрируем игрока в чате
-    if chat_id and chat_id < 0:  # только группы (chat_id < 0)
+    if chat_id and chat_id < 0:
         if chat_id not in chat_members:
             chat_members[chat_id] = set()
         chat_members[chat_id].add(uid)
 
 
 def get_name(uid):
-    """Возвращает имя игрока."""
     return user_data.get(uid, {}).get("name", "Герой")
 
 
@@ -204,7 +191,6 @@ def get_race_display(race_key):
 
 
 def make_bar(cur, max_v, emoji):
-    """Полоса прогресса 8 блоков."""
     if max_v <= 0:
         return "░░░░░░░░"
     n = max(0, min(8, round((cur / max_v) * 8)))
@@ -241,15 +227,14 @@ def item_desc(it_id):
     return ITEMS_DB.get(it_id, {}).get("desc", "")
 
 
-
 # ─── Хелперы для отправки с HTML-форматированием ─────────────────────────────
 def _send(chat_id, text, **kwargs):
     kwargs.setdefault("parse_mode", "HTML")
-    return _send(chat_id, text, **kwargs)
+    return bot.send_message(chat_id, text, **kwargs)
 
 def _edit(chat_id, message_id, text, **kwargs):
     kwargs.setdefault("parse_mode", "HTML")
-    return _edit_raw(text, chat_id=chat_id, message_id=message_id, **kwargs)
+    return bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, **kwargs)
 
 def back_to_menu_markup(page=0):
     markup = InlineKeyboardMarkup()
@@ -257,10 +242,9 @@ def back_to_menu_markup(page=0):
     return markup
 
 
-ANTISPAM_DELAY = 0.5  # глобальный кулдаун между любыми нажатиями одного юзера
+ANTISPAM_DELAY = 0.5
 
 def check_spam(uid, cb_data=None):
-    """Возвращает True если это спам. Кулдаун per-uid (не per-кнопка)."""
     now = time.time()
     last = callback_spam.get(uid, 0)
     if now - last < ANTISPAM_DELAY:
@@ -270,13 +254,11 @@ def check_spam(uid, cb_data=None):
 
 
 def _send_top10(chat_id, edit_msg=None):
-    """Топ-10 игроков по pvp_wins — только для этой группы."""
     group_uids = chat_members.get(chat_id, set())
     if group_uids:
         players = [(uid, p) for uid, p in user_data.items() if uid in group_uids and p.get("race")]
         scope_label = "ЭТОЙ ГРУППЫ"
     else:
-        # Личный чат — показываем всех (или только самого пользователя)
         players = [(uid, p) for uid, p in user_data.items() if p.get("race")]
         scope_label = "СЕРВЕРА"
     players.sort(key=lambda x: x[1].get("pvp_wins", 0), reverse=True)
@@ -305,11 +287,8 @@ def _send_top10(chat_id, edit_msg=None):
 
 
 # ─── Страничное меню ──────────────────────────────────────────────────────────
-# Каждая страница — список (label, callback_data).
-# Кнопки идут попарно, внизу стрелки навигации.
-
 MENU_PAGES = [
-    [   # Единственная страница — всё меню
+    [
         ("👤 Герой",              "menu_hero"),
         ("🎒 Инвентарь",          "menu_bag"),
         ("⚔️ Битва с монстром",   "menu_fight"),
@@ -334,7 +313,6 @@ def menu_inline_page(page: int):
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = [InlineKeyboardButton(label, callback_data=cb) for label, cb in MENU_PAGES[page]]
     markup.add(*buttons)
-    # Навигация
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("◀️", callback_data="mpage_" + str(page - 1)))
@@ -426,7 +404,6 @@ def handle_menu_action(call):
     uid = call.from_user.id
     init_user(uid, call.from_user.first_name, chat_id=call.message.chat.id)
 
-    # Антиспам для кнопок меню
     if check_spam(uid):
         bot.answer_callback_query(call.id, "⚡ Вы уже нажали эту кнопку, подождите немного!", show_alert=False)
         return
@@ -455,14 +432,14 @@ def handle_menu_action(call):
 
     elif action == "loot":
         _do_loot(call.message.chat.id, uid, edit_msg=call.message, call=call)
-        return  # _do_loot answers callback internally
+        return
 
     elif action == "race":
         _show_race_selection(call.message.chat.id, uid, edit_msg=call.message)
 
     elif action == "action":
         _do_action_inline(call)
-        return  # _do_action_inline answers callback internally
+        return
 
     elif action == "stats":
         _send_stats(call.message.chat.id, uid, edit_msg=call.message)
@@ -482,7 +459,7 @@ def handle_menu_action(call):
 
     elif action == "brawl":
         _start_brawl_menu(call)
-        return  # _start_brawl_menu answers callback internally
+        return
 
     bot.answer_callback_query(call.id)
 
@@ -499,9 +476,11 @@ def _do_action_inline(call):
     save_data()
     act = random.choice(FUNNY_ACTIONS)
     name = call.from_user.first_name
-    _edit(call.message.chat.id, call.message.message_id, "<b>🎪 СЛУЧАЙНОЕ ДЕЙСТВИЕ</b>\n──────────────────\n\n", + name + " " + act,
+    text = "<b>🎪 СЛУЧАЙНОЕ ДЕЙСТВИЕ</b>\n──────────────────\n\n" + name + " " + act
+    _edit(call.message.chat.id, call.message.message_id, text,
         reply_markup=back_to_menu_markup(0)
     )
+    bot.answer_callback_query(call.id)
 
 
 def _send_stats(chat_id, uid, edit_msg=None):
@@ -536,7 +515,6 @@ def _send_stats(chat_id, uid, edit_msg=None):
         "📈 Винрейт (PvP): <b>" + ratio + "</b>"
     )
 
-    # ── Отправляем текст ──────────────────────────────────────────────────────
     if edit_msg:
         _edit(chat_id, edit_msg.message_id, text,
             reply_markup=back_to_menu_markup(0)
@@ -544,18 +522,15 @@ def _send_stats(chat_id, uid, edit_msg=None):
     else:
         _send(chat_id, text)
 
-    # ── График побед над игроками (всегда отдельным сообщением) ───────────────
     if not HAS_MPL:
         return
     dates_raw = p.get("pvp_win_dates", [])
     if not dates_raw:
         return
 
-    # Считаем победы по дням
     from collections import Counter
     counts = Counter(dates_raw)
 
-    # Диапазон: от первой победы до сегодня
     today = datetime.today().date()
     first = datetime.strptime(min(counts.keys()), "%Y-%m-%d").date()
     all_days = []
@@ -903,7 +878,6 @@ def handle_item_use(call):
         log += "Амулет активирован! Следующий d20 = 15+. 🍀"
 
     elif it_id == "fishrod":
-        # Удочка ловит случайный предмет
         caught = random.choice(ITEM_KEYS)
         p["inventory"].append(caught)
         log += "Закинул удочку... поймал: " + item_name(caught) + "! 🎣"
@@ -970,7 +944,6 @@ def handle_pve(call):
     pname = get_name(uid)
     event = random.choice(BATTLE_EVENTS)
 
-    # Инициализируем HP монстра (примерно как у игрока)
     monster_hp = random.randint(60, 120)
     monster_max_hp = monster_hp
     player_hp = p["hp"]
@@ -1023,18 +996,16 @@ def handle_pve(call):
         if monster_hp <= 0:
             winner = "player"
             break
-        if player_hp <= p["max_hp"] * 0.1:  # игрок почти мёртв
+        if player_hp <= p["max_hp"] * 0.1:
             winner = "monster"
             break
 
         log += "\n"
 
-    # Применяем итоговый HP
     p["hp"] = player_hp
 
     log += "\n──────────────────\n"
     if winner == "player" or (winner is None and monster_hp < monster_max_hp // 2):
-        # Победил игрок (или нанёс больше урона за 6 раундов)
         if winner is None:
             log += "🏆 " + pname + " продержался все " + str(MAX_ROUNDS) + " раундов и победил по очкам!\n"
         else:
@@ -1119,7 +1090,6 @@ def handle_pvp_battle(call):
     atk_id = duel["attacker"]
     def_id = duel["defender"]
 
-    # ── Отклонить вызов (защищающийся) ───────────────────────────────────────
     if prefix == "dueld":
         if uid != def_id:
             bot.answer_callback_query(call.id, "Только вызванный игрок может отклонить!", show_alert=True)
@@ -1127,27 +1097,26 @@ def handle_pvp_battle(call):
         del active_pvp[b_id]
         n_atk = get_name(atk_id)
         n_def = get_name(def_id)
-        _edit(call.message.chat.id, call.message.message_id, "<b>❌ ДУЭЛЬ ОТКЛОНЕНА</b>\n──────────────────\n\n", + n_def + " отклонил вызов " + n_atk + ".",
+        text = "<b>❌ ДУЭЛЬ ОТКЛОНЕНА</b>\n──────────────────\n\n" + n_def + " отклонил вызов " + n_atk + "."
+        _edit(call.message.chat.id, call.message.message_id, text,
             reply_markup=back_to_menu_markup(0)
         )
         bot.answer_callback_query(call.id, "Вызов отклонён.")
         return
 
-    # ── Отозвать / Сдаться (duels) ────────────────────────────────────────────
     if prefix == "duels":
         phase = duel.get("phase", "challenge")
         if phase == "challenge":
-            # Отозвать вызов — только атакующий
             if uid != atk_id:
                 bot.answer_callback_query(call.id, "Только атакующий может отозвать вызов!", show_alert=True)
                 return
             del active_pvp[b_id]
-            _edit(call.message.chat.id, call.message.message_id, "<b>🏳️ ВЫЗОВ ОТОЗВАН</b>\n──────────────────\n\n", + get_name(atk_id) + " отозвал вызов.",
+            text = "<b>🏳️ ВЫЗОВ ОТОЗВАН</b>\n──────────────────\n\n" + get_name(atk_id) + " отозвал вызов."
+            _edit(call.message.chat.id, call.message.message_id, text,
                 reply_markup=back_to_menu_markup(0)
             )
             bot.answer_callback_query(call.id, "Вызов отозван.")
         else:
-            # Сдаться во время боя — любой участник
             if uid not in (atk_id, def_id):
                 bot.answer_callback_query(call.id, "Ты не участник этой дуэли!", show_alert=True)
                 return
@@ -1175,14 +1144,11 @@ def handle_pvp_battle(call):
             bot.answer_callback_query(call.id, "Ты сдался.")
         return
 
-    # ── Принять вызов (физ / маг) и сыграть 3 раунда ─────────────────────────
-    # prefix: "duelp" = физ, "duelm" = маг
-    mode = prefix[4]   # 'p' или 'm'
+    mode = prefix[4]
     if uid != def_id:
         bot.answer_callback_query(call.id, "Это не твоя дуэль!")
         return
 
-    # Переводим дуэль в фазу боя
     duel["phase"] = "fighting"
 
     p1 = user_data[atk_id]
@@ -1192,7 +1158,6 @@ def handle_pvp_battle(call):
     b1 = p1["combat_bonus"] + get_active_roll_buff(atk_id)
     b2 = p2["combat_bonus"] + get_active_roll_buff(def_id)
 
-    # ── 3 раунда (лучший из 3) ────────────────────────────────────────────────
     wins1 = 0
     wins2 = 0
     rounds_log = []
@@ -1232,7 +1197,6 @@ def handle_pvp_battle(call):
 
         rounds_log.append(rline)
 
-    # ── Итог дуэли ────────────────────────────────────────────────────────────
     log = (
         "<b>⚔️ ДУЭЛЬ</b>\n"
         "──────────────────\n"
@@ -1272,13 +1236,6 @@ def handle_pvp_battle(call):
 
 
 # ─── /brawl — групповая битва (до 4 игроков) ─────────────────────────────────
-#
-# Логика:
-#   1. /brawl — создаёт лобби, кнопка "Присоединиться"
-#   2. Игроки жмут кнопку (до 4 человек)
-#   3. Создатель жмёт "Начать бой" (минимум 2 игрока)
-#   4. Каждый выбирает атаку, бой считается когда все ответили
-#   5. Победитель — кто набрал больший счёт
 
 def _start_brawl_menu(call):
     uid = call.from_user.id
@@ -1293,7 +1250,7 @@ def _start_brawl_menu(call):
     active_brawl[brawl_id] = {
         "owner": uid,
         "players": [uid],
-        "phase": "lobby",   # lobby / choosing / done
+        "phase": "lobby",
         "choices": {},
         "chat_id": call.message.chat.id,
         "msg_id": None,
@@ -1364,7 +1321,6 @@ def start_brawl_cmd(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("brawl_"))
 def handle_brawl(call):
     parts = call.data.split("_", 2)
-    # parts = ["brawl", action, brawl_id]
     if len(parts) < 3:
         return
     action   = parts[1]
@@ -1378,7 +1334,6 @@ def handle_brawl(call):
 
     brawl = active_brawl[brawl_id]
 
-    # ── отменить битву (только организатор, фаза lobby) ──────────────────────
     if action == "cancel":
         if uid != brawl["owner"]:
             bot.answer_callback_query(call.id, "Только организатор может отменить битву!", show_alert=True)
@@ -1393,7 +1348,6 @@ def handle_brawl(call):
         bot.answer_callback_query(call.id, "Битва отменена.")
         return
 
-    # ── присоединиться ────────────────────────────────────────────────────────
     if action == "join":
         if brawl["phase"] != "lobby":
             bot.answer_callback_query(call.id, "Битва уже идёт!", show_alert=True)
@@ -1408,7 +1362,6 @@ def handle_brawl(call):
             bot.answer_callback_query(call.id, "Лобби полное! Максимум 10 игроков.", show_alert=True)
             return
         brawl["players"].append(uid)
-        # Обновляем сообщение лобби
         lines = []
         for pid in brawl["players"]:
             p = user_data[pid]
@@ -1426,7 +1379,6 @@ def handle_brawl(call):
         )
         bot.answer_callback_query(call.id, "Ты в битве!")
 
-    # ── начать бой ────────────────────────────────────────────────────────────
     elif action == "start":
         if uid != brawl["owner"]:
             bot.answer_callback_query(call.id, "Только организатор может начать бой!", show_alert=True)
@@ -1451,7 +1403,6 @@ def handle_brawl(call):
             reply_markup=markup)
         bot.answer_callback_query(call.id)
 
-    # ── выбор атаки ───────────────────────────────────────────────────────────
     elif action in ["phys", "magic"]:
         if brawl["phase"] != "choosing":
             bot.answer_callback_query(call.id, "Сейчас не фаза выбора.")
@@ -1469,7 +1420,6 @@ def handle_brawl(call):
             bot.answer_callback_query(call.id, pname + " выбрал! Ждём ещё " + str(waited) + " игроков.")
         else:
             bot.answer_callback_query(call.id, pname + " выбрал! Считаем результат...")
-        # Когда все выбрали — считаем результат
         if len(brawl["choices"]) == len(brawl["players"]):
             _resolve_brawl(brawl_id)
 
@@ -1500,7 +1450,6 @@ def _resolve_brawl(brawl_id):
     sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     winner_id, winner_score = sorted_scores[0]
 
-    # Урон проигравшим
     loser_lines = []
     for uid, score in sorted_scores[1:]:
         p = user_data[uid]
@@ -1512,7 +1461,6 @@ def _resolve_brawl(brawl_id):
             + "(осталось " + str(p["hp"]) + "/" + str(p["max_hp"]) + ")"
         )
 
-    # Победитель получает победу + шанс дропа
     user_data[winner_id]["wins"] = user_data[winner_id].get("wins", 0) + 1
     user_data[winner_id]["pvp_wins"] = user_data[winner_id].get("pvp_wins", 0) + 1
     user_data[winner_id].setdefault("pvp_win_dates", []).append(time.strftime("%Y-%m-%d"))
